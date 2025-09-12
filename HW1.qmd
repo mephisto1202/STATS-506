@@ -3,6 +3,7 @@ title: "HW1"
 output:
   html_document:
     self_contained: yes
+    output-file: "HW1.html"
 ---
 ## **https://github.com/mephisto1202/STATS-506.git**
 ## **Problem 1 - Abalone Data**
