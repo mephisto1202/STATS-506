@@ -4,9 +4,11 @@ output:
   html_document:
     self_contained: yes
 ---
-
+## **https://github.com/mephisto1202/STATS-506.git**
 ## **Problem 1 - Abalone Data**
+
 1.1
+
 ```{r}
 #' Step 1: Read the raw data from the CSV file.
 abalone <- read.csv("abalone.data", header = FALSE) 
@@ -17,14 +19,18 @@ colnames(abalone) <- column_names
 #' Step 4: Display the first few rows to verify the data was loaded correctly.
 head(abalone)
 ```
+
 1.2
+
 ```{r}
 #' Step 1: Use table() to calculate number in different sex.
 sex_counts <- table(abalone$Sex)
 #' Step 2: Use print to output the data.
 print(sex_counts)
 ```
+
 1.3
+
 ```{r}
 #'Step 1: Calculate different weights' correlation with rings.
 whole_weight_cor <- cor(abalone$Whole_weight, abalone$Rings)
@@ -69,13 +75,18 @@ print(max_rings_data[, c("Whole_weight", "Shucked_weight", "Viscera_weight", "Sh
 percentage <- sum(abalone$Viscera_weight > abalone$Shell_weight) / nrow(abalone) * 100
 cat("the percentage of abalones have a viscera weight larger than their shell weight is:", round(percentage, 2), "%\n")
 ```
+
 ## **Problem 2 - Food Expenditure Data**
+
 2.1
+
 ```{r}
 #' import data
 food_data <- read.csv("food_expenditure.csv", header = TRUE)
 ```
+
 2.2
+
 ```{r}
 #'Step 1: Simplify the name.
 new_column_names <- c(
@@ -88,7 +99,9 @@ colnames(food_data) <- new_column_names
 #' Step 3: Check the name.
 names(food_data)
 ```
+
 2.3
+
 ```{r}
 #' Step 1: Show the counts before restrict.
 cat("Before:", nrow(food_data), "\n")
@@ -97,7 +110,9 @@ food_data_usd <- subset(food_data, currency == "USD")
 #' Step 3: Show the counts after restrict.
 cat("After:", nrow(food_data_usd), "\n")
 ```
+
 2.4
+
 ```{r}
 cleaned_food_data <- food_data_usd
 #' Step 1: Show the lines before cleaning.
@@ -121,8 +136,11 @@ cat("--- Final repoert ---\n")
 cat("After all clean,the counts are:", nrow(cleaned_food_data), "\n")
 head(cleaned_food_data)
 ```
+
 ## **Problem 3 - Collatz conjecture**
+
 3.1
+
 ```{r}
 #' Compute the next number in a Collatz sequence.
 #' This function takes a positive integer and applies the Collatz conjecture rules:
@@ -150,7 +168,9 @@ nextCollatz <- function(n) {
 cat("nextCollatz(5) = ", nextCollatz(5), "\n")
 cat("nextCollatz(16) = ", nextCollatz(16), "\n")
 ```
+
 3.2
+
 ```{r}
 #' Generate a Collatz sequence.
 #' This function computes the complete Collatz sequence for a given positive integer,
@@ -185,7 +205,9 @@ print(collatzSequence(5)$sequence)
 cat("\ncollatzSequence(19) =")
 print(collatzSequence(19)$sequence)
 ```
+
 3.3
+
 ```{r}
 #' Use Collatz sequence to find the shortest and longest sequence.
 #' Use virable to save the information about thelongest and shortest sequence.
