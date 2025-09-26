@@ -1,0 +1,429 @@
+---
+title: "HW2"
+format:
+  html:
+    self-contained: true
+---
+
+## Problem 1
+
+version 1
+
+```{r}
+#' @title A random walk using a for loop
+#' @description This function simulates a 1-dimensional random walk
+#' with specific rules, implemented using a for loop.
+#' @param n The number of steps for the random walk.
+#' @return The final position of the walk.
+#' @examples
+#' random_walk1(10)
+#' random_walk1(100)
+random_walk1 <- function(n) {
+  position <- 0
+  #'initial the first position
+  for (i in 1:n) {
+    first_choice <- sample(c(1, -1), 1, prob = c(0.5, 0.5))
+    #' loop for n times
+    if (first_choice == 1) {
+      final_step <- ifelse(runif(1) < 0.05, 10, 1)
+      #' situation for choosing 1
+    } else {
+      final_step <- ifelse(runif(1) < 0.20, -3, -1)
+      #' situation for choosing -1
+    }
+    position <- position + final_step
+    #' position after 1 loop
+  }
+  return(position)
+}
+```
+
+version 2
+
+```{r}
+#' @title A random walk using vectorized functions
+#' @description This function simulates a 1-dimensional random walk
+#' using vectorized R functions for improved performance.
+#' @param n The number of steps for the random walk.
+#' @return The final position of the walk.
+#' @examples
+#' random_walk2(10)
+#' random_walk2(100)
+random_walk2 <- function(n) {
+  #' Generate n initial moves (+1 or -1)
+  steps <- sample(c(1, -1), n, replace = TRUE, prob = c(0.5, 0.5))
+  
+  #' Identify positions for special steps
+  special_plus <- which(steps == 1 & runif(n) < 0.05)
+  special_minus <- which(steps == -1 & runif(n) < 0.20)
+  
+  #' Replace the values for special steps
+  steps[special_plus] <- 10
+  steps[special_minus] <- -3
+  
+  #' Sum all the steps to get the final position
+  return(sum(steps))
+}
+```
+
+version3
+
+```{r}
+#' @title A random walk using the apply family
+#' @description This function simulates a 1-dimensional random walk
+#' by applying a single-step function over the number of steps.
+#' @param n The number of steps for the random walk.
+#' @return The final position of the walk.
+#' @examples
+#' random_walk3(10)
+#' random_walk3(100)
+random_walk3 <- function(n) {
+  
+  #' Helper function to compute a single step
+  single_step <- function(x) {
+    step_choice <- sample(c(1, -1), 1, prob = c(0.5, 0.5))
+    if (step_choice == 1) {
+      final_step <- ifelse(runif(1) < 0.05, 10, 1)
+    } else {
+      final_step <- ifelse(runif(1) < 0.20, -3, -1)
+    }
+    return(final_step)
+  }
+  
+  #' Apply the single_step function n times and sum the results
+  return(sum(sapply(1:n, single_step)))
+}
+```
+
+```{r}
+random_walk1(10)
+random_walk2(10)
+random_walk3(10)
+random_walk1(1000)
+random_walk2(1000)
+random_walk3(1000)
+```
+
+B
+
+```{r}
+set.seed(42)
+pos1_10 <- random_walk1(10)
+set.seed(42)
+pos2_10 <- random_walk2(10)
+set.seed(42)
+pos3_10 <- random_walk3(10)
+print(paste("random_walk1(10):", pos1_10))
+print(paste("random_walk2(10):", pos2_10))
+print(paste("random_walk3(10):", pos3_10))
+print(paste("Are they all the same? ", pos1_10 == pos2_10 && pos2_10 == pos3_10))
+set.seed(42)
+pos1_1000 <- random_walk1(1000)
+set.seed(42)
+pos2_1000 <- random_walk2(1000)
+set.seed(42)
+pos3_1000 <- random_walk3(1000)
+print(paste("random_walk1(1000):", pos1_1000))
+print(paste("random_walk2(1000):", pos2_1000))
+print(paste("random_walk3(1000):", pos3_1000))
+print(paste("Are they all the same? ", pos1_1000 == pos2_1000 && pos2_1000 == pos3_1000))
+```
+
+Why this is different? I thought it may be because of the order. In version 1 and 3, the function uses the random by order, but in version 2 ,it will use the random in plus first , then is the minus, so it is different, if we need to make it same , we need to make some changes in version 2.
+
+```{r}
+#' @title A random walk using a purely vectorized approach
+#' @description This version of the random walk uses vectorized functions
+#' to produce a result that is identical to the loop-based versions
+#' by pre-generating all required random numbers.
+#' @param n The number of steps for the random walk.
+#' @return The final position of the walk.
+#' @examples
+adjust_random_walk2 <- function(n) {
+  all_random_numbers <- runif(2 * n)
+  #' first, we get all the random number
+  direction_choices <- all_random_numbers[seq(1, by = 2, length.out = n)]
+  #' in version 1 and 2 we know that the sequence of consuming the random number is plus of minus first, then is the value.So , 1,3,5 is direction, 2, 4, 6is value
+  move_choices <- all_random_numbers[seq(2, by = 2, length.out = n)]
+  final_steps <- numeric(n)
+  plus_steps_indices <- which(direction_choices >= 0.5)
+  final_steps[plus_steps_indices] <- ifelse(move_choices[plus_steps_indices] < 0.05, 10, 1)
+  minus_steps_indices <- which(direction_choices < 0.5)
+  final_steps[minus_steps_indices] <- ifelse(move_choices[minus_steps_indices] < 0.20, -3, -1)
+  return(sum(final_steps))
+}
+```
+
+```{r}
+set.seed(42)
+pos1_10 <- random_walk1(10)
+set.seed(42)
+pos2_10 <- adjust_random_walk2(10)
+set.seed(42)
+pos3_10 <- random_walk3(10)
+print(paste("random_walk1(10):", pos1_10))
+print(paste("random_walk2(10):", pos2_10))
+print(paste("random_walk3(10):", pos3_10))
+print(paste("Are they all the same? ", pos1_10 == pos2_10 && pos2_10 == pos3_10))
+set.seed(42)
+pos1_1000 <- random_walk1(1000)
+set.seed(42)
+pos2_1000 <- adjust_random_walk2(1000)
+set.seed(42)
+pos3_1000 <- random_walk3(1000)
+print(paste("random_walk1(1000):", pos1_1000))
+print(paste("random_walk2(1000):", pos2_1000))
+print(paste("random_walk3(1000):", pos3_1000))
+print(paste("Are they all the same? ", pos1_1000 == pos2_1000 && pos2_1000 == pos3_1000))
+```
+
+Conclusion, if we need to confirm that the different way will get the same result, we need to make sure that they consume the random number same.
+
+C
+
+```{r}
+library(ggplot2)
+library(microbenchmark)
+mb_low <- microbenchmark(
+  "Loop (V1)" = random_walk1(1000),
+  "Vectorized (V2)" = random_walk2(1000),
+  "Apply (V3)" = random_walk3(1000),
+  "Adjust_Vectorized (V2)" = adjust_random_walk2(1000),
+  times = 100
+)
+
+print("Performance for n = 1,000")
+print(mb_low)
+print(autoplot(mb_low))
+mb_high <- microbenchmark(
+  "Loop (V1)" = random_walk1(100000),
+  "Vectorized (V2)" = random_walk2(100000),
+  "Apply (V3)" = random_walk3(100000),
+  "Adjust_Vectorized (V2)" = adjust_random_walk2(100000),
+  times = 10
+)
+print("Performance for n = 100,000")
+print(mb_high)
+print(autoplot(mb_high))
+
+```
+
+Discussion: We can easily find that,the vectorized is the quickest, because it will solve problem by one time, different from loops. The loops will need to check the check the loop condition first, then Increment the counter and finally,look up and access the next element in the vector, moreover , this function will use the sum for many times and it will waste a lot of time. The function of apply is similar to this ,so v1 and v2 are very close to each other. But for the adjusted V2 , to make sure the result are same, we have to add some logic.The adjusted version, by reintroducing a strict step-by-step process to sync its random number consumption, sacrifices the very advantage that makes vectorized code fast in the first place. But it is still faster than V1 and V3 and very close to origin V2. It shows that these logic did not waste too much time.
+
+D
+
+```{r}
+#' V2 is the quickest, so I choose V2 here
+monte_carlo_walk <- function(n, num_simulations = 100000) {
+  results <- replicate(num_simulations, random_walk2(n))
+  zero_count <- sum(results == 0)
+  probability <- zero_count / num_simulations
+  return(probability)
+}
+set.seed(42)
+prob_10 <- monte_carlo_walk(10)
+print(paste("Probability of ending at 0 with 10 steps:", prob_10))
+prob_100 <- monte_carlo_walk(100)
+print(paste("Probability of ending at 0 with 100 steps:", prob_100))
+prob_1000 <- monte_carlo_walk(1000)
+print(paste("Probability of ending at 0 with 1000 steps:", prob_1000))
+```
+
+we can find that, with the increase of step numbers , the probability of 0 is becoming less.
+
+## Problem 2
+
+```{r}
+#' @title Estimate Average Daily Cars via Monte Carlo Simulation
+#' @description This script performs a Monte Carlo simulation to estimate the average
+#' number of cars passing an intersection in a 24-hour period. It uses vectorized R functions to model different hourly traffic distributions without the use of loops, as specified by the problem.
+#' @param num_simulations An integer specifying the number of days to simulate
+#' @return A numeric value representing the estimated average number of cars per day, based on the simulation.
+#' @examples
+#' # Estimate with the default 100,000 simulations
+#' estimate_daily_cars()
+#' # Estimate with a smaller number of simulations for a quick check
+#' estimate_daily_cars(num_simulations = 1000)
+estimate_daily_cars <- function(num_simulations = 100000) {
+  
+  #'Step 1: Simulate car counts for each time block
+  
+  #' From midnight until 7 AM (7 hours): Poisson with mean 1
+  cars_midnight_to_7am <- rpois(7 * num_simulations, lambda = 1)
+  
+  #' From 9am to 4pm (8 hours): Poisson with mean 8
+  cars_9am_to_4pm <- rpois(8 * num_simulations, lambda = 8)
+  
+  #' From 6pm to 11pm (6 hours): Poisson with mean 12
+  cars_6pm_to_11pm <- rpois(6 * num_simulations, lambda = 12)
+  
+  #' From 11pm to midnight (1 hour): Assumed to be Poisson with mean 1, consistent with the problem's 'midnight until 7 AM' assumption.
+  cars_11pm_to_12am <- rpois(1 * num_simulations, lambda = 1)
+  #' During rush hours (8am and 5pm - 2 hours): Normal with mean 60 and variance 12
+  cars_rush_hour <- rnorm(2 * num_simulations, mean = 60, sd = sqrt(12))
+  
+  #' Step 2: Combine and calculate daily totals
+  all_hourly_cars <- c(
+    cars_midnight_to_7am,
+    cars_9am_to_4pm,
+    cars_6pm_to_11pm,
+    cars_11pm_to_12am,
+    cars_rush_hour
+  )
+  
+  # Reshape the vector into a matrix where each row represents a full day.
+  hourly_matrix <- matrix(
+    all_hourly_cars,
+    ncol = 24,
+    byrow = TRUE
+  )
+  
+  #' Use rowSums() to calculate the total number of cars for each simulated day.
+  daily_totals <- rowSums(hourly_matrix)
+  #' Step 3: Calculate and return the final average
+  #' The estimated average is the mean of all the simulated daily totals.
+  average_daily_cars <- mean(daily_totals)
+  
+  return(average_daily_cars)
+}
+  estimated_cars <- estimate_daily_cars()
+  print(paste("Estimated average daily cars:", round(estimated_cars, 2)))
+```
+
+## Problem 3
+
+A
+
+```{r}
+youtube <- read.csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-03-02/youtube.csv')
+youtube_clean <- subset(youtube, select = -c(
+  brand,
+  superbowl_ads_dot_com_url,
+  youtube_url,
+  id,
+  etag,
+  published_at,
+  title,
+  description,
+  thumbnail,
+  channel_title
+))
+
+print("Original Dimensions:")
+print(dim(youtube))
+print("Dimensions after de-identification:")
+print(dim(youtube_clean))
+```
+
+```{r}
+print(head(youtube_clean))
+```
+
+B
+
+```{r}
+library(ggplot2)
+
+#' Set up the plotting grid
+par(mfrow = c(3, 2))
+
+#' Examine the distribution of each count variable
+hist(youtube_clean$view_count, main = "View Counts", xlab = "View Counts")
+hist(youtube_clean$like_count, main = "Like Counts", xlab = "Like Counts")
+hist(youtube_clean$dislike_count, main = "Dislike Counts", xlab = "Dislike Counts")
+hist(youtube_clean$favorite_count, main = "Favorite Counts", xlab = "Favorite Counts")
+hist(youtube_clean$comment_count, main = "Comment Counts", xlab = "Comment Counts")
+```
+
+```{r}
+#' favorite counts are different, have a look at it
+zero_count <- sum(youtube_clean$favorite_count == 0, na.rm = TRUE)
+total_count <- nrow(youtube_clean)
+zero_percentage <- (zero_count / total_count) * 100
+
+print(paste("number of 0:", zero_count))
+print(paste("percentage of 0:", round(zero_percentage, 2), "%"))
+print("different value:")
+print(unique(youtube_clean$favorite_count))
+```
+
+We can find that View counts ,Like counts,Dislike counts,Comment counts are all ii, they are Skewed to the right and can use a transformation prior to being used as the outcome in a linear regression model. But the favorite count is iii,the variable would not be appropriate to use as the outcome in a linear regression model because the values of this are all 0 and NA.
+
+```{r}
+youtube_transformed <- youtube_clean
+youtube_transformed$log_views <- log(youtube_transformed$view_count + 1)
+youtube_transformed$log_likes <- log(youtube_transformed$like_count + 1)
+youtube_transformed$log_dislikes <- log(youtube_transformed$dislike_count + 1)
+youtube_transformed$log_comments <- log(youtube_transformed$comment_count + 1)
+par(mfrow = c(3, 2))
+hist(youtube_transformed$log_views, main = "Log-Transformed View Counts", xlab = "Log(View Counts)")
+hist(youtube_transformed$log_likes, main = "Log-Transformed Like Counts", xlab = "Log(Like Counts)")
+hist(youtube_transformed$log_dislikes, main = "Log-Transformed Dislike Counts", xlab = "Log(Dislike Counts)")
+hist(youtube_transformed$log_comments, main = "Log-Transformed Comment Counts", xlab = "Log(Comment Counts)")
+
+```
+
+C
+
+```{r}
+model_views <- lm(log_views ~ funny + show_product_quickly + patriotic + celebrity + danger + animals + use_sex + year, data = youtube_transformed)
+model_likes <- lm(log_likes ~ funny + show_product_quickly + patriotic + celebrity + danger + animals + use_sex + year, data = youtube_transformed)
+model_dislikes <- lm(log_dislikes ~ funny + show_product_quickly + patriotic + celebrity + danger + animals + use_sex + year, data = youtube_transformed)
+model_comments <- lm(log_comments ~ funny + show_product_quickly + patriotic + celebrity + danger + animals + use_sex + year, data = youtube_transformed)
+print("================== Summary for Log Views ==================")
+summary(model_views)
+print("================== Summary for Log Likes ==================")
+summary(model_likes)
+print("================== Summary for Log Dislikes ==================")
+summary(model_dislikes)
+print("================== Summary for Log Comments ==================")
+summary(model_comments)
+
+```
+
+Overall, across the four models, Year was the only variable consistently found to have a significant positive effect on multiple outcomes (specifically, log_likes and log_dislikes). This suggests that, over time, both likes and dislikes for these ads have been increasing significantly.
+
+As for the seven ad characteristics, their influence on view, like, dislike, and comment counts was largely not statistically significant. This could imply that other factors not included in our models, such as ad quality or marketing strategy, have a stronger impact on YouTube engagement metrics.
+
+D
+
+```{r}
+#' a data frame without NA
+model_data <- na.omit(data.frame(
+  y = youtube_transformed$log_views,
+  funny = youtube_transformed$funny,
+  show_product_quickly = youtube_transformed$show_product_quickly,
+  patriotic = youtube_transformed$patriotic,
+  celebrity = youtube_transformed$celebrity,
+  danger = youtube_transformed$danger,
+  animals = youtube_transformed$animals,
+  use_sex = youtube_transformed$use_sex,
+  year = youtube_transformed$year
+))
+#'Step 1: Create the dependent variable vector (y)
+y <- as.matrix(model_data$y)
+
+#' Step 2: Create the design matrix (X) 
+X <- model.matrix(y ~ funny + show_product_quickly + patriotic + celebrity + danger + animals + use_sex + year, data = model_data)
+
+#' Step 3: Manually calculate the regression coefficients (beta_hat_manual) 
+#' Formula: beta_hat = (X'X)^-1 * X'y
+XtX <- t(X) %*% X
+XtX_inv <- solve(XtX)
+Xty <- t(X) %*% y
+beta_hat_manual <- XtX_inv %*% Xty
+
+#' Step 4: Use lm() to confirm the results 
+#' Fit the model using lm()
+model_lm <- lm(log_views ~ funny + show_product_quickly + patriotic + celebrity + danger + animals + use_sex + year, data = youtube_transformed)
+
+#' Get the coefficients from the lm() model
+beta_hat_lm <- coef(model_lm)
+print("Manually Calculated Coefficients (Manual Beta Hat):")
+print(beta_hat_manual)
+print("lm() Calculated Coefficients (lm() Beta Hat):")
+print(beta_hat_lm)
+all_equal <- all.equal(as.vector(beta_hat_manual), as.vector(beta_hat_lm))
+print("Are the manual and lm() results identical?")
+print(all_equal)
+```
