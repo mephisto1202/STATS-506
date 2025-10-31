@@ -1,0 +1,547 @@
+---
+title: "hw3"
+format:
+  html:
+    embed-resources: true 
+    self-contained: true
+---
+
+## Problem1
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org")) 
+install.packages("haven") 
+library(haven) 
+```
+
+```{r}
+library(dplyr)
+```
+
+```{r}
+data_aux <- read_xpt("AUX_I.XPT")
+data_demo <- read_xpt("DEMO_I.XPT")
+dim(data_aux)
+dim(data_demo)
+cat("--- AUX_I.XPT (data_aux) 的列名 ---\n")
+print(colnames(data_aux))
+cat("\n--- DEMO_I.XPT (data_demo) 的列名 ---\n")
+print(colnames(data_demo))
+```
+
+```{r}
+# use 'SEQN' (Respondent sequence number) as the common key
+merged_data <- left_join(
+    data_demo, 
+    data_aux, 
+    by = "SEQN" 
+)
+# print the dimension
+cat("--- Print out the dimensions of the merged ---\n")
+dimensions <- dim(merged_data)
+cat(paste0("Number of Rows (Respondents): ", dimensions[1], "\n"))
+cat(paste0("Number of Columns (Total Variables): ", dimensions[2], "\n"))
+print(dimensions)
+```
+
+```{r}
+cat("\n--- Preview of the Merged Data (First few rows) ---\n")
+# Preview a few key columns (ID, Gender, and the two Tympanometric width measures)
+print(head(merged_data[, c("SEQN", "RIAGENDR", "AUXTWIDR", "AUXTWIDL")]))
+```
+
+```{r}
+# use mutate() to change the virable
+cleaned_data <- merged_data %>%
+  # 1. Gender (RIAGENDR)
+  #    - 1=Male, 2=Female.
+  mutate(Gender_F = factor(RIAGENDR, 
+                           levels = c(1, 2), 
+                           labels = c("Male", "Female"))) %>%
+  
+  # 2. Citizenship status (DMDCITZN)
+  #    - 1=Citizen, 2=Not citizen. (7=Refused, 9=Don't Know)
+  mutate(Citizenship_F = case_when(
+    DMDCITZN == 1 ~ "Citizen",
+    DMDCITZN == 2 ~ "Not Citizen",
+    DMDCITZN %in% c(7, 9) ~ "Missing/Unknown",
+    is.na(DMDCITZN) ~ "Missing/Unknown"
+  ) %>% factor()) %>%
+  
+  # 3. Number of children 5 years or younger (DMDHHSZB)
+  #    - DMDHHSZB: 1-5 (Number), 6=6+, 9=Don't Know/Missing
+  mutate(Children5yo_F = case_when(
+    DMDHHSZB %in% 1:5 ~ as.character(DMDHHSZB),
+    DMDHHSZB == 6 ~ "6+",
+    TRUE ~ "Missing/Unknown"
+  ) %>% factor()) %>%
+  
+  # 4. Annual household income (INDHHIN2)
+  #    - 1-15 (Income categories), 77=Refused, 99=Don't Know, . = Missing
+  mutate(Income_ORD = case_when(
+    INDHHIN2 %in% 1:15 ~ as.character(INDHHIN2),
+    TRUE ~ "Missing/Unknown"
+  ) %>% factor(levels = c(as.character(1:15), "Missing/Unknown"), 
+               ordered = TRUE)) %>% 
+  
+  # 5. Tympanometric width measure (AUXTWIDR/AUXTWIDL) 
+  filter(!is.na(AUXTWIDR) & !is.na(Gender_F) & !is.na(AUXTWIDL))
+cat("--- Problem 1.b: Data Cleaning Results ---\n")
+cat("Filtered Data Dimensions: ", dim(cleaned_data), "\n")
+cat("\nAnnual Household Income (INDHHIN2) Factor Levels:\n")
+print(levels(cleaned_data$Income_ORD))
+```
+
+```{r}
+cat("\n--- Problem 1.c: Fitting Poisson Regression Models ---\n")
+model_1R <- glm(AUXTWIDR ~ Gender_F, 
+                data = cleaned_data, 
+                family = poisson(link = "log"))
+cat("\nModel 1R: AUXTWIDR ~ Gender_F\n")
+print(summary(model_1R))
+model_2R <- glm(AUXTWIDR ~ Gender_F + Income_ORD, 
+                data = cleaned_data, 
+                family = poisson(link = "log"))
+cat("\nModel 2R: AUXTWIDR ~ Gender_F + Income_ORD\n")
+print(summary(model_2R))
+model_1L <- glm(AUXTWIDL ~ Gender_F, 
+                data = cleaned_data, 
+                family = poisson(link = "log"))
+cat("\nModel 1L: AUXTWIDL ~ Gender_F\n")
+print(summary(model_1L))
+model_2L <- glm(AUXTWIDL ~ Gender_F + Income_ORD, 
+                data = cleaned_data, 
+                family = poisson(link = "log"))
+cat("\nModel 2L: AUXTWIDL ~ Gender_F + Income_ORD\n")
+print(summary(model_2L))
+```
+
+## Problem2
+
+```{r}
+install.packages("stargazer") 
+
+library(stargazer)
+```
+
+```{r, results='asis'}
+stargazer(model_1R, model_2R, model_1L, model_2L,
+          type = "html", 
+          title = "Poisson Regression Results for Tympanometric Width",
+          dep.var.labels = c("Right Ear Width", "Left Ear Width"),
+          covariate.labels = c("Gender: Female (Ref: Male)", 
+              "Income Category 2", 
+              "Income Category 3", 
+              "Income Category 4", 
+              "Income Category 5", 
+              "Income Category 6", 
+              "Income Category 7", 
+              "Income Category 8", 
+              "Income Category 9", 
+              "Income Category 10", 
+              "Income Category 11", 
+              "Income Category 12", 
+              "Income Category 13", 
+              "Income Category 14", 
+              "Income Category 15", 
+              "Income: Missing/Unknown"),
+          column.separate = c(2, 2),
+          notes = "Poisson Regression with log link function. Reference groups: Gender=Male, Income Category 1.",
+          notes.align = "l"
+)
+```
+
+Based on the results from model 2L, there is **statistically significant evidence** that the predicted width measure **differs between males and females** when controlling for household income. The coefficient for Gender_FFemale is 0.010758 with a highly significant p-value of **0.00180** (p<0.01), leading us to reject the null hypothesis of no difference in predicted mean values. This translates to an **Incidence Risk Ratio (IRR) of** 1.0108, indicating that, all else being equal, the predicted left ear width measure for females is **approximately** 1.08% higher than that for males; the 95% confidence interval for this ratio is [1.0040,1.0177], which does not contain 1.0, thus confirming the statistical significance of this small but distinct difference.
+
+```{r}
+
+install.packages(c("DBI", "RSQLite", "dplyr", "microbenchmark"))
+
+library(DBI)      
+library(RSQLite)  
+library(dplyr)
+library(microbenchmark)
+db_path <- "sakila_master.db"
+con <- dbConnect(RSQLite::SQLite(), db_path)
+```
+
+```{r}
+sql_query_a1 <- "
+  SELECT 
+    store_id, 
+    COUNT(customer_id) AS total_customers, 
+    SUM(active) AS active_customers
+  FROM 
+    customer
+  GROUP BY 
+    store_id;
+"
+customers_by_store <- dbGetQuery(con, sql_query_a1)
+
+result_r_a <- customers_by_store %>%
+  mutate(
+    active_percentage = (active_customers / total_customers) * 100
+  ) %>%
+  select(
+    store_id, 
+    total_customers, 
+    active_percentage
+  )
+
+cat("--- Problem A: Two-Step Results ---\n")
+print(result_r_a)
+```
+
+```{r}
+sql_query_a2 <- "
+  SELECT 
+    store_id, 
+    COUNT(customer_id) AS total_customers,
+    -- CAST(... AS REAL) ensures floating-point division
+    (CAST(SUM(active) AS REAL) * 100) / COUNT(customer_id) AS active_percentage
+  FROM 
+    customer
+  GROUP BY 
+    store_id;
+"
+result_sql_a <- dbGetQuery(con, sql_query_a2)
+
+cat("\n--- Problem A: One-Step Results ---\n")
+print(result_sql_a)
+```
+
+```{r}
+comparison_a <- microbenchmark(
+  TwoStep = {
+    customers_by_store <- dbGetQuery(con, sql_query_a1)
+    customers_by_store %>%
+      mutate(active_percentage = (active_customers / total_customers) * 100)
+  },
+  OneStep = {
+    dbGetQuery(con, sql_query_a2)
+  },
+  times = 10,
+  unit = "ms"
+)
+
+cat("\n--- Problem A: Performance Comparison (ms) ---\n")
+print(comparison_a)
+
+```
+
+```{r}
+sql_query_b1 <- "
+  SELECT 
+    s.first_name, 
+    s.last_name, 
+    cy.country
+  FROM 
+    staff s
+  JOIN 
+    address a ON s.address_id = a.address_id
+  JOIN 
+    city c ON a.city_id = c.city_id
+  JOIN 
+    country cy ON c.country_id = cy.country_id;
+"
+staff_info_sql <- dbGetQuery(con, sql_query_b1)
+
+result_r_b <- staff_info_sql %>%
+  mutate(
+    full_name = paste(first_name, last_name)
+  ) %>%
+  select(
+    full_name,
+    country
+  )
+
+cat("\n--- Problem B: Two-Step Results ---\n")
+print(result_r_b)
+```
+
+```{r}
+sql_query_b2 <- "
+  SELECT 
+    s.first_name || ' ' || s.last_name AS full_name,
+    cy.country
+  FROM 
+    staff s
+  JOIN 
+    address a ON s.address_id = a.address_id
+  JOIN 
+    city c ON a.city_id = c.city_id
+  JOIN 
+    country cy ON c.country_id = cy.country_id;
+"
+result_sql_b <- dbGetQuery(con, sql_query_b2)
+
+cat("\n--- Problem B: One-Step Results ---\n")
+print(result_sql_b)
+```
+
+```{r}
+comparison_b <- microbenchmark(
+  TwoStep = {
+    staff_info_sql <- dbGetQuery(con, sql_query_b1)
+    staff_info_sql %>%
+      mutate(full_name = paste(first_name, last_name))
+  },
+  OneStep = {
+    dbGetQuery(con, sql_query_b2)
+  },
+  times = 10,
+  unit = "ms"
+)
+
+cat("\n--- Problem B: Performance Comparison (ms) ---\n")
+print(comparison_b)
+```
+
+```{r}
+sql_query_c1 <- "
+  SELECT 
+    f.title, 
+    p.amount
+  FROM 
+    payment p
+  JOIN 
+    rental r ON p.rental_id = r.rental_id
+  JOIN 
+    inventory i ON r.inventory_id = i.inventory_id
+  JOIN 
+    film f ON i.film_id = f.film_id;
+"
+all_rentals <- dbGetQuery(con, sql_query_c1)
+
+max_amount <- max(all_rentals$amount)
+
+result_r_c <- all_rentals %>%
+  filter(amount == max_amount) %>%
+  distinct(title, amount) %>%
+  arrange(title)
+
+cat("\n--- Problem C: Two-Step Results ---\n")
+print(result_r_c)
+```
+
+```{r}
+sql_query_c2 <- "
+  SELECT DISTINCT
+    f.title,
+    p.amount
+  FROM 
+    payment p
+  JOIN 
+    rental r ON p.rental_id = r.rental_id
+  JOIN 
+    inventory i ON r.inventory_id = i.inventory_id
+  JOIN 
+    film f ON i.film_id = f.film_id
+  WHERE 
+    p.amount IN (SELECT MAX(amount) FROM payment);
+"
+result_sql_c <- dbGetQuery(con, sql_query_c2)
+
+cat("\n--- Problem C: One-Step Results ---\n")
+print(result_sql_c)
+```
+
+```{r}
+comparison_c <- microbenchmark(
+  TwoStep = {
+    all_rentals <- dbGetQuery(con, sql_query_c1)
+    max_amount <- max(all_rentals$amount)
+    all_rentals %>%
+      filter(amount == max_amount) %>%
+      distinct(title, amount)
+  },
+  OneStep = {
+    dbGetQuery(con, sql_query_c2)
+  },
+  times = 10,
+  unit = "ms"
+)
+
+cat("\n--- Problem C: Performance Comparison (ms) ---\n")
+print(comparison_c)
+```
+
+```{r}
+dbDisconnect(con)
+```
+
+## Problem3
+
+```{r}
+install.packages("tidyverse")
+library(tidyverse)
+```
+
+```{r}
+print(colnames(data))
+cat("------------------\n")
+```
+
+```{r}
+data <- read_csv("au-500.csv")
+cat("\n--- a.Website Percentage (.com's percentage) ---\n")
+com_strict_count <- sum(
+    grepl("\\.com$", data$web, ignore.case = TRUE) &
+    !grepl("\\.com\\.[a-z]{2}$", data$web, ignore.case = TRUE)
+)
+
+total_websites <- nrow(data)
+com_percentage <- (com_strict_count / total_websites) * 100
+
+cat("Total records:", total_websites, "\n")
+cat("Count of strictly '.com' domains (excluding .com.au, etc.):", com_strict_count, "\n")
+cat(sprintf("Percentage of '.com' domains: %.2f%%\n", com_percentage))
+```
+
+```{r}
+cat("\n--- b. Most Common Email Domain ---\n")
+
+# Use the column name 'email'
+# 1. Extract the domain name
+domains <- str_extract(data$email, "(?<=@)[a-zA-Z0-9.-]+")
+# 2. Count the frequency of each unique domain
+domain_counts <- table(domains)
+# 3. Find the domain with the highest count (the maximum value)
+most_common_domain <- names(which.max(domain_counts))
+max_count <- max(domain_counts)
+cat("The most common email domain is:", most_common_domain, "\n")
+cat("It appears", max_count, "times.\n")
+```
+
+```{r}
+cat("\n--- c. Proportion of Non-Alphanumeric Characters ---\n")
+# Use the column name 'company_name'
+# 1. Proportion excluding commas and whitespace
+non_alnum_count_full <- sum(grepl("[^[:alnum:] ,]", data$company_name))
+proportion_full <- non_alnum_count_full / nrow(data)
+cat(sprintf("Proportion of companies containing special chars (excl. ',', ' '): %.4f\n", proportion_full))
+# 2. Proportion excluding ampersands (&) as well
+non_alnum_count_no_ampersand <- sum(grepl("[^[:alnum:] ,&]", data$company_name))
+proportion_no_ampersand <- non_alnum_count_no_ampersand / nrow(data)
+cat(sprintf("Proportion of companies containing special chars (excl. ',', ' ', '&'): %.4f\n", proportion_no_ampersand))
+```
+
+```{r}
+cat("\n--- d. Phone Number Formatting and Printing ---\n")
+
+# Define the function to clean and format a 10-digit phone number
+format_phone <- function(phone_string) {
+  # 1. Clean: Remove all non-digit characters (including spaces, parentheses, and hyphens)
+  cleaned_digits <- gsub("[^0-9]", "", phone_string)
+
+  # 2. Format: Convert to 1234-567-890 style, but only if it results in exactly 10 digits
+  if (nchar(cleaned_digits) == 10) {
+    formatted_phone <- paste0(
+      str_sub(cleaned_digits, 1, 4), "-", # First 4 digits
+      str_sub(cleaned_digits, 5, 7), "-", # Next 3 digits
+      str_sub(cleaned_digits, 8, 10)      # Last 3 digits
+    )
+    return(formatted_phone)
+  } else {
+    # If the number is not 10 digits after cleaning, return NA
+    return(NA) 
+  }
+}
+
+# Apply the function to the 'phone1' and 'phone2' columns
+data$phone1_mobile_format <- sapply(data$phone1, format_phone)
+data$phone2_mobile_format <- sapply(data$phone2, format_phone)
+
+cat("First 10 'Mobile' formatted numbers from Phone 1:\n")
+# The head() function prints the first 10 elements
+print(head(data$phone1_mobile_format, 10))
+
+cat("\nFirst 10 'Mobile' formatted numbers from Phone 2:\n")
+print(head(data$phone2_mobile_format, 10))
+```
+
+```{r}
+cat("\n--- e. Histogram of Apartment Numbers (Log Scale) ---\n")
+
+# Use the column name 'address'
+# 1. Extract apartment numbers: Assume any digits at the end of the address are the number.
+apt_numbers_char <- str_extract(data$address, "\\d+$")
+apt_numbers <- as.numeric(apt_numbers_char)
+
+# 2. Compute the natural logarithm (log)
+#    - Remove NA values (addresses without a number at the end)
+valid_apt_numbers <- na.omit(apt_numbers)
+log_apt_numbers <- log(valid_apt_numbers[valid_apt_numbers > 0])
+
+# 3. Plot the histogram
+hist(log_apt_numbers,
+     main = "Histogram of Apartment Numbers (Log Scale)",
+     xlab = "Log(Apartment Number)",
+     col = "darkblue", # You can change the color!
+     border = "white")
+```
+
+```{r}
+cat("\n--- f. Benford's Law Test (First Digit Distribution) ---\n")
+apt_numbers_char <- str_extract(data$address, "\\d+$")
+apt_numbers <- as.numeric(apt_numbers_char)
+valid_apt_numbers <- na.omit(apt_numbers)
+valid_apt_numbers <- valid_apt_numbers[valid_apt_numbers > 0] 
+
+# 1. Extract the first non-zero digit of the apartment numbers
+first_digits_char <- str_extract(as.character(valid_apt_numbers), "[1-9]")
+first_digits <- as.numeric(first_digits_char)
+
+# 2. Calculate Actual Distribution
+actual_counts <- table(first_digits)
+actual_prob <- actual_counts / sum(actual_counts)
+
+# 3. Benford's Theoretical Distribution
+digits <- 1:9
+# Benford's formula: P(d) = log10(1 + 1/d)
+benford_prob <- log10(1 + 1 / digits)
+
+# 4. Prepare data for comparison (Data Frame)
+benford_df <- data.frame(
+  Digit = digits,
+  Actual = 0, # Initialize actual probabilities to 0
+  Benford = benford_prob
+)
+# Match and fill the actual probabilities into the data frame
+benford_df$Actual[match(names(actual_prob), benford_df$Digit)] <- actual_prob
+
+# 5. Visual Comparison (using ggplot2)
+benford_plot <- ggplot(benford_df, aes(x = factor(Digit))) +
+  # Actual Distribution (Bars)
+  geom_bar(aes(y = Actual, fill = "Actual"), stat = "identity", alpha = 0.7, position = position_dodge(width = 0.6)) +
+  # Benford's Theoretical Distribution (Line and Points)
+  geom_point(aes(y = Benford, color = "Benford"), size = 3) +
+  geom_line(aes(y = Benford, group = 1, color = "Benford"), linetype = "dashed") +
+  labs(
+    title = "Apartment Numbers First Digit Distribution vs. Benford's Law",
+    x = "First Digit (1-9)",
+    y = "Proportion",
+    fill = "Distribution",
+    color = "Distribution"
+  ) +
+  scale_fill_manual(values = c("Actual" = "coral")) +
+  scale_color_manual(values = c("Benford" = "blue")) +
+  theme_minimal()
+
+print(benford_plot)
+
+# 6. Statistical Test: Chi-squared Test
+# Prepare actual counts vector (ensure all digits 1-9 are present, filling 0 where count is missing)
+actual_counts_vector <- actual_counts[match(digits, names(actual_counts))]
+actual_counts_vector[is.na(actual_counts_vector)] <- 0
+
+# Perform the Chi-squared test using Benford probabilities as the expected distribution
+benford_test <- chisq.test(actual_counts_vector, p = benford_prob)
+```
+
+```{r}
+cat("\n--- Chi-squared Test Results ---\n")
+print(benford_test)
+```
+
+Conclusion: The P-value is less than 0.05. We reject the null hypothesis. The distribution of apartment numbers does not significantly follow Benford's Law. This suggests they may not behave like true real-world data subject to Benford's constraints
