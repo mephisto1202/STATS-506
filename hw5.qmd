@@ -1,0 +1,588 @@
+---
+title: "hw5"
+format: html
+self-contained: true
+---
+
+## Problem1
+
+a\. function
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+remove.packages(c("plotly", "htmlwidgets"))
+install.packages(c("plotly", "htmlwidgets"), repos = "https://cloud.r-project.org/")
+library(stats) 
+
+### 1. define (setClass)
+setClass("waldCI",
+         slots = c(
+             level = "numeric",  #  (confidence intervals)
+             mean = "numeric",   #  (Mean)
+             sterr = "numeric",  #  (Standard Error)
+             lb = "numeric",     #  (Lower Bound)
+             ub = "numeric"      #  (Upper Bound)
+         ),
+         # default
+         prototype = list(level = 0.95, mean = NA_real_, sterr = NA_real_, lb = NA_real_, ub = NA_real_)
+)
+```
+
+```{r}
+# a function to calculate,use mean, sterr, level to calculate lb and ub
+.calculate_waldCI <- function(mean, sterr, level) {
+    # find Z first according to the level 
+    alpha <- 1 - level
+    z_score <- qnorm(1 - alpha / 2)
+    margin_of_error <- z_score * sterr
+    
+    lb <- mean - margin_of_error
+    ub <- mean + margin_of_error
+    
+    return(list(lb = lb, ub = ub))
+}
+```
+
+```{r}
+### 2. validator
+setValidity("waldCI", function(object) {
+    # level in (0,1)
+    if (object@level <= 0 || object@level >= 1) {
+        return("Error: Confidence level must be strictly between 0 and 1.")
+    }
+    #  lb < ub
+    if (object@lb >= object@ub) {
+        return("Error: Lower bound (lb) must be strictly less than upper bound (ub).")
+    }
+    # validate mean/sterr and lb/ub are same(allow error)
+    if (!is.na(object@mean) && !is.na(object@sterr)) {
+        calculated_ci <- .calculate_waldCI(object@mean, object@sterr, object@level)
+        
+        if (abs(object@lb - calculated_ci$lb) > 1e-6 || abs(object@ub - calculated_ci$ub) > 1e-6) {
+             return("Error: Stored lb/ub are inconsistent with mean/sterr/level.")
+        }
+    }
+    
+    return(TRUE)
+})
+```
+
+```{r}
+### 3.  custome Constructor
+waldCI <- function(level, mean = NULL, sterr = NULL, lb = NULL, ub = NULL) {
+    
+    # check level
+    if (!is.numeric(level) || length(level) != 1 || level <= 0 || level >= 1) {
+        stop("Confidence level must be a single numeric value between 0 and 1.")
+    }
+    
+    if (!is.null(mean) && !is.null(sterr)) {
+        # 1: have mean and sterr
+        if (sterr <= 0) stop("Standard error must be positive.")
+        
+        ci_bounds <- .calculate_waldCI(mean, sterr, level)
+        new("waldCI", 
+            level = level, 
+            mean = mean, 
+            sterr = sterr, 
+            lb = ci_bounds$lb, 
+            ub = ci_bounds$ub
+        )
+        
+    } else if (!is.null(lb) && !is.null(ub)) {
+        # 2: have lb and ub
+        if (lb >= ub) stop("Lower bound must be less than upper bound.")
+        
+        # calculate mean and sterr
+        mean <- (lb + ub) / 2
+        alpha <- 1 - level
+        z_score <- qnorm(1 - alpha / 2)
+        sterr <- (ub - lb) / (2 * z_score)
+        
+        new("waldCI", 
+            level = level, 
+            mean = mean, 
+            sterr = sterr, 
+            lb = lb, 
+            ub = ub
+        )
+    } else {
+        stop("Must provide either (mean and sterr) or (lb and ub).")
+    }
+}
+```
+
+```{r}
+### 4. Accessors
+setGeneric("lb", function(x) standardGeneric("lb"))
+setGeneric("ub", function(x) standardGeneric("ub"))
+setGeneric("mean", function(x) standardGeneric("mean"))
+setGeneric("sterr", function(x) standardGeneric("sterr"))
+setGeneric("level", function(x) standardGeneric("level"))
+setMethod("lb", "waldCI", function(x) x@lb)
+setMethod("ub", "waldCI", function(x) x@ub)
+setMethod("mean", "waldCI", function(x) x@mean)
+setMethod("sterr", "waldCI", function(x) x@sterr)
+setMethod("level", "waldCI", function(x) x@level)
+```
+
+```{r}
+### 5. Setters
+setGeneric("level<-", function(x, value) standardGeneric("level<-"))
+setGeneric("mean<-", function(x, value) standardGeneric("mean<-"))
+setGeneric("sterr<-", function(x, value) standardGeneric("sterr<-"))
+setGeneric("lb<-", function(x, value) standardGeneric("lb<-"))
+setGeneric("ub<-", function(x, value) standardGeneric("ub<-"))
+# when we have mean, sterr, level ，we need to recalculate lb and ub
+.recalculate_ci_bounds <- function(object) {
+    if (!is.na(object@mean) && !is.na(object@sterr) && object@sterr > 0) {
+        ci_bounds <- .calculate_waldCI(object@mean, object@sterr, object@level)
+        object@lb <- ci_bounds$lb
+        object@ub <- ci_bounds$ub
+    } else {
+        # if sterr is 0 or null，clear the lb/ub and let validator to check and retrun error
+        object@lb <- NA_real_
+        object@ub <- NA_real_
+    }
+    return(object)
+}
+
+# level<-
+setReplaceMethod("level", "waldCI", function(x, value) {
+    x@level <- value
+    x <- .recalculate_ci_bounds(x) 
+    validObject(x)                 
+    return(x)
+})
+
+# mean<-
+setReplaceMethod("mean", "waldCI", function(x, value) {
+    x@mean <- value
+    x <- .recalculate_ci_bounds(x) 
+    validObject(x)
+    return(x)
+})
+
+# sterr<-
+setReplaceMethod("sterr", "waldCI", function(x, value) {
+    x@sterr <- value
+    x <- .recalculate_ci_bounds(x) 
+    validObject(x)
+    return(x)
+})
+
+# lb<- 
+setReplaceMethod("lb", "waldCI", function(x, value) {
+    x@lb <- value
+    if (!is.na(x@ub) && !is.na(x@lb) && x@lb < x@ub) {
+        x@mean <- (x@lb + x@ub) / 2
+        alpha <- 1 - x@level
+        z_score <- qnorm(1 - alpha / 2)
+        x@sterr <- (x@ub - x@lb) / (2 * z_score)
+    } else {
+        x@mean <- NA_real_
+        x@sterr <- NA_real_
+    }
+    validObject(x)
+    return(x)
+})
+
+# ub<- 
+setReplaceMethod("ub", "waldCI", function(x, value) {
+    x@ub <- value
+    if (!is.na(x@lb) && !is.na(x@ub) && x@lb < x@ub) {
+        x@mean <- (x@lb + x@ub) / 2
+        alpha <- 1 - x@level
+        z_score <- qnorm(1 - alpha / 2)
+        x@sterr <- (x@ub - x@lb) / (2 * z_score)
+    } else {
+        x@mean <- NA_real_
+        x@sterr <- NA_real_
+    }
+    validObject(x)
+    return(x)
+})
+```
+
+```{r}
+### 6. show 
+setMethod("show", "waldCI", function(object) {
+    cat(paste0("A waldCI object (", object@level * 100, "% Confidence Interval)\n"))
+    cat(sprintf("  CI Range: [%.4f, %.4f]\n", object@lb, object@ub))
+    cat(sprintf("  Mean: %.4f | Standard Error: %.4f\n", object@mean, object@sterr))
+})
+
+
+### 7. contains 
+setGeneric("contains", function(object, value) standardGeneric("contains"))
+setMethod("contains", "waldCI", function(object, value) {
+    if (!is.numeric(value)) stop("Value must be numeric.")
+    return(value >= object@lb & value <= object@ub)
+})
+
+
+### 8. overlap 
+setGeneric("overlap", function(ci1, ci2) standardGeneric("overlap"))
+setMethod("overlap", signature(ci1 = "waldCI", ci2 = "waldCI"), function(ci1, ci2) {
+    # condition of ovelaping two intervals [a, b] and [c, d] is max(a, c) <= min(b, d)
+    max_lower <- max(ci1@lb, ci2@lb)
+    min_upper <- min(ci1@ub, ci2@ub)
+    return(max_lower <= min_upper)
+})
+
+
+### 9. as.numeric 
+setMethod("as.numeric", "waldCI", function(x) {
+    # 返回 c(lb, ub)
+    return(c(lb = x@lb, ub = x@ub))
+})
+
+
+### 10. transformCI 
+setGeneric("transformCI", function(object, FUN) standardGeneric("transformCI"))
+setMethod("transformCI", "waldCI", function(object, FUN) {
+    
+    warning("Transforming a confidence interval using a function (FUN) is only statistically valid if FUN is monotonic (strictly increasing or decreasing). The mean and standard error slots are NOT updated to reflect the transformation and are set to NA.")
+    
+    new_lb_candidate <- FUN(object@lb)
+    new_ub_candidate <- FUN(object@ub)
+
+    new_lb <- min(new_lb_candidate, new_ub_candidate)
+    new_ub <- max(new_lb_candidate, new_ub_candidate)
+    
+    new_object <- new("waldCI", 
+                      level = object@level,
+                      mean = NA_real_,
+                      sterr = NA_real_,
+                      lb = new_lb,
+                      ub = new_ub)
+    
+    # use validObject to check ( lb < ub)
+    validObject(new_object)
+    
+    return(new_object)
+})
+```
+
+```{r}
+ci1 <- waldCI(level = 0.95, lb = 17.2, ub = 24.7)
+ci2 <- waldCI(level = 0.99, mean = 13, sterr = 2.5)
+ci3 <- waldCI(level = 0.75, lb = 27.43, ub = 39.22)
+```
+
+b.test
+
+```{r}
+ci1
+ci2
+ci3
+as.numeric(ci1)
+as.numeric(ci2)
+as.numeric(ci3)
+lb(ci2)
+ub(ci2)
+mean(ci1)
+sterr(ci3)
+level(ci2)
+lb(ci2) <- 10.5
+mean(ci3) <- 34
+level(ci3) <- .8
+contains(ci1, 17)
+contains(ci3, 44)
+overlap(ci1, ci2)
+eci1 <- transformCI(ci1, sqrt)
+eci1
+mean(transformCI(ci2, log))
+```
+
+c.validate
+
+```{r}
+tryCatch({
+    waldCI(level = 0.95, mean = 10, sterr = -1.0)
+}, error = function(e) {
+    cat("✅ Test 1 (Negative sterr in constructor) failed as expected.\n")
+})
+tryCatch({
+    waldCI(level = 0.95, lb = 20, ub = 10)
+}, error = function(e) {
+    cat("✅ Test 2a (lb > ub in constructor) failed as expected.\n")
+})
+
+ci_valid <- waldCI(level = 0.95, lb = 10, ub = 20)
+tryCatch({
+    lb(ci_valid) <- 25 # 导致 lb(25) > ub(20)
+}, error = function(e) {
+    cat("✅ Test 2b (lb > ub via setter) failed as expected.\n")
+})
+ci_valid_2 <- waldCI(level = 0.95, mean = 10, sterr = 1)
+
+# 4a:  level = 0
+tryCatch({
+    level(ci_valid_2) <- 0 
+}, error = function(e) {
+    cat("✅ Test 4a (level = 0 via setter) failed as expected.\n")
+})
+
+# 4b:  sterr = 0
+tryCatch({
+    sterr(ci_valid_2) <- 0 
+}, error = function(e) {
+    cat("✅ Test 4b (sterr = 0 via setter) failed as expected.\n")
+})
+```
+
+## Problem2
+
+```{r}
+install.packages(c("tidyverse", "scales"))
+library(tidyverse)
+library(scales) 
+library(lubridate) 
+
+COVID_DATA_URL <- "https://raw.githubusercontent.com/nytimes/covid-19-data/refs/heads/master/rolling-averages/us-states.csv"
+
+# input population
+state_populations <- tribble(
+  ~state, ~population,
+  "California", 39538223, "Texas", 29145505, "Florida", 21538187,
+  "New York", 20201249, "Pennsylvania", 13002700, "Illinois", 12812508,
+  "Ohio", 11799448, "Georgia", 10711908, "North Carolina", 10439388,
+  "Michigan", 10077331, "New Jersey", 9288994, "Virginia", 8631393,
+  "Washington", 7705281, "Arizona", 7151502, "Massachusetts", 7029917,
+  "Tennessee", 6910840, "Indiana", 6785528, "Missouri", 6154913,
+  "Maryland", 6177224, "Wisconsin", 5893718, "Colorado", 5773714,
+  "Minnesota", 5706494, "South Carolina", 5118425, "Alabama", 5024279,
+  "Louisiana", 4657757, "Kentucky", 4505836, "Oregon", 4237256,
+  "Oklahoma", 3959353, "Connecticut", 3605944, "Utah", 3271616,
+  "Iowa", 3190369, "Nevada", 3104614, "Arkansas", 3011524,
+  "Kansas", 2937880, "Mississippi", 2961279, "New Mexico", 2117522,
+  "Nebraska", 1961504, "West Virginia", 1793716, "Idaho", 1839106,
+  "Hawaii", 1455271, "New Hampshire", 1377527, "Maine", 1362359,
+  "Montana", 1084225, "Rhode Island", 1097379, "Delaware", 989948,
+  "South Dakota", 886667, "North Dakota", 779094, "Alaska", 733391,
+  "District of Columbia", 689545, "Vermont", 643077, "Wyoming", 576851
+)
+
+# --- load data 
+df_covid <- read_csv(COVID_DATA_URL, show_col_types = FALSE) %>%
+  rename(new_cases_avg = cases_avg) %>%
+  mutate(date = as.Date(date))
+
+# Exclude territories and join population data
+territories <- c('Puerto Rico', 'Guam', 'Virgin Islands', 'Northern Mariana Islands')
+df_covid_us <- df_covid %>%
+  filter(!state %in% territories) %>%
+  left_join(state_populations, by = "state")
+```
+
+a
+
+```{r}
+install.packages("plotly")
+library(plotly)
+df_national <- df_covid_us %>%
+  group_by(date) %>%
+  summarise(national_cases_avg = sum(new_cases_avg, na.rm = TRUE))
+
+spikes_df <- tribble(
+  ~date, ~label, ~y_offset,
+  "2020-07-20", "1. Summer Wave", 100000,
+  "2021-01-08", "2. First Winter Peak", 300000,
+  "2021-09-01", "3. Delta Wave", 200000,
+  "2022-01-15", "4. Omicron Surge", 750000
+) %>%
+  mutate(date = as.Date(date))
+
+plot_a_pure_plotly <- plot_ly(df_national, x = ~date) %>%
+  add_trace(y = ~national_cases_avg, 
+            type = 'scatter', 
+            mode = 'lines', 
+            line = list(color = '#0072B2', width = 2),
+            name = 'Daily New Cases',
+            hoverinfo = 'text',
+            text = ~paste("Date: ", date, "<br>Cases: ", scales::comma(national_cases_avg))) %>%
+
+  layout(
+    shapes = lapply(1:nrow(spikes_df), function(i) {
+      list(
+        type = "line",
+        x0 = spikes_df$date[i], x1 = spikes_df$date[i],
+        y0 = 0, y1 = max(df_national$national_cases_avg, na.rm = TRUE) * 1.1,
+        line = list(color = 'red', dash = 'dash', width = 1)
+      )
+    }),
+    annotations = lapply(1:nrow(spikes_df), function(i) {
+      list(
+        x = spikes_df$date[i],
+        y = spikes_df$y_offset[i],
+        text = spikes_df$label[i],
+        showarrow = FALSE,
+        font = list(color = 'red', size = 10),
+        xref = "x", yref = "y"
+      )
+    }),
+    
+    title = list(text = "Question a. US COVID-19 Daily New Cases: Peak Analysis", x = 0.5),
+    xaxis = list(title = "Date", rangeslider = list(type = "date")),  
+    yaxis = list(title = "Daily New Cases (7-Day Avg.)", tickformat = ","), 
+    margin = list(l = 80, r = 20, b = 80, t = 80),
+    showlegend = FALSE
+  )
+
+print(plot_a_pure_plotly)
+```
+
+```{r}
+knitr::include_graphics("1.png")
+```
+
+There are 4 major peaks and many minor spikes
+
+b
+
+```{r}
+df_rate <- df_covid_us %>%
+  group_by(state, population) %>%
+  summarise(total_cases = max(cases, na.rm = TRUE), .groups = 'drop') %>%
+  ungroup() %>%
+  filter(!is.na(population) & state != "District of Columbia") %>%
+  mutate(infection_rate_per_100k = (total_cases / population) * 100000)
+
+top_state <- df_rate %>% arrange(desc(infection_rate_per_100k)) %>% slice(1) %>% pull(state)
+bottom_state <- df_rate %>% arrange(infection_rate_per_100k) %>% slice(1) %>% pull(state)
+
+df_compare <- df_covid_us %>%
+  filter(state %in% c(top_state, bottom_state)) %>%
+  mutate(new_cases_per_100k = (new_cases_avg / population) * 100000) %>%
+  filter(!is.na(new_cases_per_100k))
+color_map <- c(
+  setNames("#E69F00", top_state), 
+  setNames("#56B4E9", bottom_state) 
+)
+df_compare$hover_text <- paste(
+  "State:", df_compare$state,
+  "<br>Date:", df_compare$date,
+  "<br>Cases/100k:", round(df_compare$new_cases_per_100k, 2)
+)
+
+plot_b_pure_plotly <- plot_ly(df_compare, x = ~date, y = ~new_cases_per_100k, 
+                              color = ~state, 
+                              colors = color_map,
+                              text = ~hover_text,
+                              hoverinfo = 'text',
+                              type = 'scatter', 
+                              mode = 'lines',
+                              line = list(width = 2, opacity = 0.8)) %>%
+  layout(
+    title = list(
+      text = paste("Question b. COVID-19 Trajectory: Highest Rate State (", top_state, ") vs. Lowest Rate State (", bottom_state, ")"),
+      x = 0.5,
+      font = list(family = "Arial", size = 14, weight = "bold") # 模拟 theme_minimal + bold
+    ),
+    xaxis = list(
+      title = "Date",
+      rangeslider = list(type = "date"), 
+      rangeselector = list( 
+        buttons = list(
+          list(count = 3, label = "3 mo", step = "month", stepmode = "backward"),
+          list(count = 6, label = "6 mo", step = "month", stepmode = "backward"),
+          list(step = "all")
+        )
+      )
+    ),
+    yaxis = list(
+      title = "Daily New Cases (per 100k Pop.)",
+      tickformat = '.1f'
+    ),
+    legend = list(
+      orientation = 'h', 
+      x = 0.1, y = -0.1 
+    ),
+    hovermode = "x unified" 
+  )
+
+print(plot_b_pure_plotly)
+```
+
+```{r}
+knitr::include_graphics("2.png")
+```
+
+This distinction in peak magnitude directly correlates with their overall cumulative infection rates, suggesting that factors like high population density and urbanized travel patterns in Rhode Island amplified the effects of viral surges compared to the more dispersed population of Idaho.
+
+c
+
+```{r}
+# Define a 'substantial' threshold (7-day avg. first reaches 10 cases)
+threshold <- 10
+early_period_end_date <- as.Date("2020-05-31")
+first_five_states_df <- df_covid_us %>%
+  filter(date <= early_period_end_date) %>%
+  group_by(state) %>%
+  filter(new_cases_avg >= threshold) %>%
+  slice_min(date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(date) %>%
+  slice(1:5) %>%
+  select(state)
+
+first_five_states <- first_five_states_df$state 
+df_early_all <- df_covid_us %>%
+  filter(!is.na(population) & date <= early_period_end_date & state != "District of Columbia") %>%
+  left_join(first_five_states_df, by = "state", suffix = c("", "_first")) %>%
+  mutate(
+    is_first_five = ifelse(state %in% first_five_states, state, "Other States"),
+    line_opacity = ifelse(state %in% first_five_states, 1, 0.2),
+    hover_text = paste(
+      "State:", state, "<br>Date:", date, "<br>Cases:", scales::comma(new_cases_avg)
+    )
+  )
+
+bright_colors <- RColorBrewer::brewer.pal(max(3, length(first_five_states)), "Set1")[1:length(first_five_states)]
+
+color_map_data <- c(
+  setNames("gray", "Other States"),
+  setNames(bright_colors, first_five_states)
+)
+
+
+plot_c_final_plotly <- plot_ly(df_early_all, x = ~date) %>%
+  
+  add_trace(y = ~new_cases_avg, 
+            type = 'scatter', 
+            mode = 'lines', 
+            color = ~is_first_five,
+            colors = color_map_data,
+            line = list(width = ~ifelse(is_first_five == "Other States", 1, 3)),
+            opacity = ~line_opacity,
+            text = ~hover_text,
+            hoverinfo = 'text') %>%
+  
+  layout(
+    shapes = list(
+      type = "line",
+      x0 = min(df_early_all$date), x1 = max(df_early_all$date),
+      y0 = threshold, y1 = threshold,
+      line = list(color = 'darkgrey', dash = 'dot', width = 2)
+    ),
+    
+    title = list(text = "Question c. Identifying the First Five States with Substantial COVID-19 (Early 2020)", x = 0.5),
+    xaxis = list(title = "Date (Early 2020)", rangeslider = list(type = "date")),
+    yaxis = list(title = "Daily New Cases (7-Day Avg.)", tickformat = ","),
+    showlegend = TRUE,
+    legend = list(title = list(text = "State Group"), x = 0.8, y = 0.9),
+    hovermode = "closest"
+  )
+
+print(plot_c_final_plotly)
+```
+
+```{r}
+
+knitr::include_graphics("3.png")
+```
+
+```         
+The five states first to experience substantial COVID-19 (based on >=  10  cases) is: Washington, California, New York, Massachusetts, Colorado
+```
