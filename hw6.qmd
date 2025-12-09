@@ -1,0 +1,529 @@
+---
+title: "hw6"
+format: html
+self-contained: true
+---
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+install.packages("e1071")
+library(lme4)
+library(data.table)
+library(ggplot2)
+library(purrr) 
+library(stringr)
+```
+
+Problem1
+
+```{r}
+Rcpp::cppFunction(code = '
+double central_moment_cpp(Rcpp::NumericVector x, int k) {
+  int n = x.size();
+  //check vector
+  if (n == 0) return R_NaN; //  
+
+  // 1. calculate mean (mu)
+  double mu = 0.0;
+  for (int i = 0; i < n; ++i) { // 
+    mu += x[i];
+  }
+  mu /= n;
+
+  // 2. 计calculate centre
+  double accumulator = 0.0; // 
+  for (int i = 0; i < n; ++i) {
+    double difference = x[i] - mu;
+    accumulator += std::pow(difference, k); // 
+  }
+
+  // 3.return
+  return accumulator / n;
+}
+')
+```
+
+```{r}
+set.seed(42) 
+# generate a vector
+x <- rnorm(5000) 
+library(e1071)
+library(dplyr)
+library(purrr)
+k_orders <- 1:5
+
+tibble(k = k_orders) %>%
+  mutate(
+    Cpp_result = map_dbl(k, ~ central_moment_cpp(x, .x)),
+    R_e1071 = map_dbl(k, ~ e1071::moment(x, order = .x, center = TRUE)) 
+  ) %>%
+  # 计calculate difference
+  mutate(diff = Cpp_result - R_e1071)
+```
+
+```{r}
+library(microbenchmark) 
+microbenchmark(
+  central_moment_cpp(x, 3), 
+  e1071::moment(x, order = 3, center = TRUE),
+  times = 100 
+)
+```
+
+Problem2
+
+A.
+
+```{r}
+library(methods)
+library(parallel)
+source("waldCI.R")
+setClass("bootstrapWaldCI",
+         contains = "waldCI",
+         slots = c(data = "ANY",          
+                   statistic = "function", 
+                   reps = "numeric",      
+                   compute = "character"  
+         ))
+
+setGeneric("rebootstrap", function(object) {
+  standardGeneric("rebootstrap")
+})
+run_bootstrap <- function(data, statistic, reps, compute) {
+  
+  n <- if (is.vector(data)) length(data) else nrow(data)
+  
+  boot_worker <- function(i) {
+    indices <- sample(1:n, n, replace = TRUE)
+    resampled_data <- if (is.vector(data)) data[indices] else data[indices, ]
+    return(statistic(resampled_data))
+  }
+  
+  if (compute == "serial") {
+    boot_stats <- sapply(1:reps, boot_worker)
+    
+  } else if (compute == "parallel") {
+    num_cores <- parallel::detectCores() - 1
+    cl <- parallel::makeCluster(num_cores)
+    boot_stats <- parallel::parSapply(cl, 1:reps, function(i, d, stat, n_rows) {
+      idx <- sample(1:n_rows, n_rows, replace = TRUE)
+      boot_dat <- if (is.vector(d)) d[idx] else d[idx, ]
+      stat(boot_dat)
+    }, d = data, stat = statistic, n_rows = n)
+    
+    parallel::stopCluster(cl)
+  } else {
+    stop("compute option must be 'serial' or 'parallel'")
+  }
+  
+
+  obs_stat <- statistic(data)
+  boot_se <- sd(boot_stats)
+  
+  return(list(mean = obs_stat, sterr = boot_se))
+}
+
+
+makeBootstrapCI <- function(statistic, data, reps = 100, level = 0.95, compute = "serial") {
+  
+
+  res <- run_bootstrap(data, statistic, reps, compute)
+
+  new("bootstrapWaldCI",
+      mean = res$mean,
+      sterr = res$sterr,
+      level = level,
+      data = data,
+      statistic = statistic,
+      reps = reps,
+      compute = compute)
+}
+
+setMethod("rebootstrap", "bootstrapWaldCI", function(object) {
+  cat("Re-bootstrapping...\n")
+
+  res <- run_bootstrap(object@data, object@statistic, object@reps, object@compute)
+  object@mean <- res$mean
+  object@sterr <- res$sterr
+  
+
+  validObject(object) 
+  return(object)
+})
+```
+
+B.
+
+```{r}
+library(ggplot2)
+
+
+mean_func <- function(x) mean(x$y)
+
+cat("=== Part B: Diamonds Data Performance Comparison ===\n")
+
+cat("\nRunning Serial Mode (reps=1000)...\n")
+time_serial_B <- system.time({
+  ci_b_serial <- makeBootstrapCI(mean_func, 
+                                 ggplot2::diamonds, 
+                                 reps = 1000, 
+                                 compute = "serial")
+})
+print(time_serial_B)
+
+
+cat("\nRunning Parallel Mode (reps=1000)...\n")
+time_parallel_B <- system.time({
+  ci_b_parallel <- makeBootstrapCI(mean_func, 
+                                   ggplot2::diamonds, 
+                                   reps = 1000, 
+                                   compute = "parallel")
+})
+print(time_parallel_B)
+
+cat("\nResult (Serial):\n")
+show(ci_b_serial)
+```
+
+In this case, serial is faster than parallel.Since the calculate of mean is a very easy task in statistic.
+
+C.
+
+```{r}
+dispCoef <- function(data) {
+  model <- lm(mpg ~ cyl + disp + wt, data = data)
+
+  return(coef(model)["disp"])
+}
+
+cat("=== Part C: Execution & Performance Comparison ===\n")
+
+
+cat("\nRunning Serial Mode (Standard prompt code)...\n")
+time_serial <- system.time({
+  ci2 <- makeBootstrapCI(dispCoef, 
+                         mtcars, 
+                         reps = 1000) 
+})
+
+cat("\nRebootstrapping ci2...\n")
+ci2_new <- rebootstrap(ci2)
+show(ci2_new) 
+
+cat("\nRunning Parallel Mode (For Comparison)...\n")
+time_parallel <- system.time({
+  ci2_parallel <- makeBootstrapCI(dispCoef, 
+                                  mtcars, 
+                                  reps = 1000, 
+                                  compute = "parallel")
+})
+
+
+cat("\n--- Performance Comparison ---\n")
+cat("Serial Time:\n")
+print(time_serial)
+
+cat("Parallel Time:\n")
+print(time_parallel)
+```
+
+In this case, parallel is better.
+
+Problem3
+
+```{r}
+library(lme4)
+library(data.table)
+library(ggplot2)
+library(purrr) 
+library(stringr)
+
+source("script.R") 
+dt <- as.data.table(df)
+rm(df) 
+countries <- unique(dt$country)
+```
+
+A.
+
+```{r}
+dt[, `:=`(
+  z_gpa = as.numeric(scale(prior_gpa)),
+  z_posts = as.numeric(scale(forum_posts)),
+  z_attempts = as.numeric(scale(quiz_attempts))
+), by = country]
+print(paste("number of model:", length(countries)))
+```
+
+```{r}
+model_list_a <- list()
+timing_results_a <- data.table()
+coefficients_a <- data.table()
+
+# simulate very model and counting time by system.time 
+for (c in countries) {
+  subset_dt <- dt[country == c]
+  time_output <- system.time({
+    model <- glmer(
+      completed_course ~ z_gpa + z_posts + z_attempts + (1 | device_type),
+      data = subset_dt,
+      family = binomial(link = "logit"),
+      # use LME4 for big data
+      control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)) 
+    )
+  })
+  
+  # storage model
+  model_list_a[[c]] <- model
+  
+  # count time
+  running_time <- unname(time_output["user.self"]) + unname(time_output["sys.self"])
+  timing_results_a <- rbindlist(list(timing_results_a, 
+                                     data.table(country = c, running_time_secs = running_time)))
+  
+  # extract 'z_posts' 
+  coef_value <- fixef(model)["z_posts"]
+  coefficients_a <- rbindlist(list(coefficients_a, 
+                                   data.table(country = c, coefficient = unname(coef_value))))
+  
+  print(paste("  - total CPU time:", round(running_time, 4), "sec"))
+}
+
+print("--- (a) every model's time ---")
+print(timing_results_a)
+```
+
+```{r}
+# Extract the estimated value, SE, and 95% CI for the z_posts coefficient for each country.
+ci_results_dt <- data.table()
+for (c in names(model_list_a)) {
+  model <- model_list_a[[c]]
+  model_summary <- summary(model)$coefficients
+  z_posts_row <- model_summary["z_posts", ]
+  estimate <- z_posts_row["Estimate"]
+  se <- z_posts_row["Std. Error"]
+  
+  # Calculate the 95% Wald Confidence Interval: Estimate ± 1.96 * SE
+  ci_low <- estimate - 1.96 * se
+  ci_high <- estimate + 1.96 * se
+
+  ci_results_dt <- rbindlist(list(ci_results_dt, 
+                                data.table(
+                                  country = c,
+                                  estimate = unname(estimate),
+                                  ci_low = unname(ci_low),
+                                  ci_high = unname(ci_high)
+                                )))
+}
+
+print(ci_results_dt)
+# VISUALIZE
+library(ggplot2)
+
+posts_ci_viz <- ggplot(ci_results_dt, 
+                       aes(x = country, 
+                           y = estimate, 
+                           ymin = ci_low, 
+                           ymax = ci_high)) +
+  # Draw the confidence interval lines (Whisker)
+  geom_errorbar(width = 0.2, size = 1) + 
+  # Draw the coefficient point estimate (Dot)
+  geom_point(size = 3, color = "#1F78B4") + # Use a dark blue dot
+  
+  # Add a reference line (If coefficient is 0, it means no effect)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  coord_cartesian(ylim = c(0.1, 0.25)) +
+  labs(
+    title = "Effect of Forum Posts on Course Completion (by Country)",
+    subtitle = "Standardized Coefficient (Log-Odds) with 95% Wald Confidence Interval",
+    x = "Country/Region",
+    y = "Coefficient Estimate (posts_std)"
+  ) +
+  # Flip the coordinate system to look more like standard academic charts (Optional)
+  # coord_flip() + 
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+print(posts_ci_viz)
+```
+
+B.
+
+```{r}
+# record the time
+total_time_start_b <- Sys.time() 
+split_dt <- split(dt, by = "country")
+library(parallel)
+num_cores <- detectCores() - 1 
+cl <- makeCluster(num_cores)
+clusterEvalQ(cl, library(lme4))
+
+# define model and funtion
+fit_and_extract_b <- function(data_subset) {
+  model_b <- glmer(
+    completed_course ~ z_gpa + z_posts + z_attempts + (1 | device_type),
+    data = data_subset,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+  )
+  coef_value <- fixef(model_b)["z_posts"]
+  return(unname(coef_value))
+}
+
+print(paste("use", num_cores, "cores to simulate ..."))
+
+# Use parLapply to run all models in parallel on the cluster
+# This step completes the model running and coefficient estimation
+coefficients_b_vector <- parLapply(cl, split_dt, fit_and_extract_b)
+
+
+stopCluster(cl)
+total_time_end_b <- Sys.time()
+total_running_time_b <- as.numeric(difftime(total_time_end_b, total_time_start_b, units = "secs"))
+print(paste("Total running time of the entire optimization script (parallel computation):", round(total_running_time_b, 4), "sec"))
+
+
+# -verify
+coefficients_b <- data.table(
+  country = names(split_dt),
+  coefficient = unlist(coefficients_b_vector)
+)
+
+comparison_dt <- merge(
+  coefficients_a, 
+  coefficients_b, 
+  by = "country", 
+  suffixes = c("_a", "_b")
+)
+
+comparison_dt[, `:=`(
+  # Calculate the difference (should be close to 0)
+  difference = coefficient_a - coefficient_b,
+  # Check if the results match (due to slight differences in numerical computation, we use a small tolerance of $10^{-6}$)
+  matched = abs(coefficient_a - coefficient_b) < 1e-6 
+)]
+
+print("z_posts Coefficient Comparison Results:")
+print(comparison_dt)
+
+if(all(comparison_dt$matched)) {
+  print("erification successful: The optimization results from Question (b) numerically match the results from Question (a).")
+} else {
+  print("Verification results do not completely match. This is often due to the glmer model's optimizer reaching slightly different local optima on different computation paths (sequential vs. parallel). However, the coefficients should be very close.")
+}
+```
+
+In this case, parallel is faster.
+
+Problem4
+
+```{r}
+library(data.table)
+url <- "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/heads/master/atp_matches_2019.csv"
+tennis <- fread(url)
+```
+
+A.
+
+```{r}
+tourneys_dt <- tennis[, tourney_name := str_replace(tourney_name, "Davis.*", "Davis Cup")] 
+tourneys_dt_summarized <- tourneys_dt[, .(count = .N), by = tourney_name]    
+tourneys_dt_summarized[, .N]                                                           
+```
+
+B.
+
+```{r}
+library(data.table)
+
+setDT(tennis)
+
+multiwinners_dt <- tennis[order(tourney_name, -match_num)
+][, .SD[1], by = tourney_name
+][, .(winner_name)
+][, .(wins = .N), by = winner_name
+][wins > 1
+][order(-wins)]
+
+multiwinners_dt[, .N]                                      
+
+```
+
+```{r}
+setDT(tennis)
+
+multiwinners_dt_top2 <- tennis[order(tourney_name, -match_num)
+][, .SD[1], by = tourney_name 
+][, .(winner_name)
+][, .(wins = .N), by = winner_name 
+][wins > 1
+][order(-wins)
+][1:2] 
+
+print(multiwinners_dt_top2)
+```
+
+C.
+
+```{r}
+library(data.table)
+
+setDT(tennis)
+ace_data_dt <- tennis[!is.na(w_ace) & !is.na(l_ace), 
+                           .(w_ace, l_ace, diff_ace = w_ace - l_ace)]
+ace_ttest_result_baseR <- t.test(ace_data_dt$diff_ace, 
+                                 mu = 0, 
+                                 alternative = "greater")
+observed_t_statistic <- ace_ttest_result_baseR$statistic
+p_value_final_baseR <- ace_ttest_result_baseR$p.value
+cat("--- Problem 2c: Standard R (t.test) Hypothesis Test Results ---\n")
+cat("Observed t-statistic:", observed_t_statistic, "\n")
+cat("P-value (One-sided test):", p_value_final_baseR, "\n")
+cat("\nConclusion:\n")
+if (p_value_final_baseR < 0.05) {
+  cat("As the P-value is less than 0.05, we reject the null hypothesis. There is strong statistical evidence that the mean number of Aces for winners is significantly greater than for losers.\n")
+} else {
+  cat("The P-value is greater than 0.05. We do not have sufficient evidence to reject the null hypothesis.\n")
+}
+```
+
+```{r}
+setDT(tennis)
+player_match_dt <- melt(
+    tennis,
+    id.vars = c("winner_id", "winner_name", "loser_id", "loser_name"),
+    measure.vars = c("winner_id", "loser_id"),
+    variable.name = "outcome_type",
+    value.name = "player_id"
+)[, 
+    .(
+        player_id = player_id,
+        is_win = (outcome_type == "winner_id"),
+        player_name = fifelse(outcome_type == "winner_id", winner_name, loser_name)
+    )
+]
+win_rate_summary_dt <- player_match_dt[, 
+    .(
+        Total_Matches = .N, 
+        Wins = sum(is_win)
+    ), 
+    by = .(player_id, player_name)
+]
+top_win_rate_players_dt <- win_rate_summary_dt[
+    Total_Matches >= 5, 
+    .(
+        player_id,
+        player_name,
+        Total_Matches,
+        Wins,
+        Win_Rate = Wins / Total_Matches 
+    )
+][order(-Win_Rate)] 
+max_win_rate <- top_win_rate_players_dt[1, Win_Rate]
+final_result_dt <- top_win_rate_players_dt[Win_Rate == max_win_rate]
+cat("\n--- Problem 2d: Highest Win Rate (Min 5 Matches) ---\n")
+print(final_result_dt)
+```
