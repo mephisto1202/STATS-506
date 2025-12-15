@@ -1,0 +1,1419 @@
+---
+title: "final project"
+format: revealjs
+---
+
+```{r}
+library(tidyverse) 
+
+df_tourney_results <- read_csv("MNCAATourneyCompactResults.csv")
+df_regular_results <- read_csv("MRegularSeasonCompactResults.csv")
+df_seeds <- read_csv("MNCAATourneySeeds.csv")
+df_conf_games <- read_csv("MConferenceTourneyGames.csv") 
+
+cat("成功加载所有四个核心数据集。\n")
+
+prepare_compact_stats <- function(df_compact_results, stats_prefix) {
+
+  df_wins <- df_compact_results %>% 
+    select(Season, TeamID = WTeamID, Score = WScore, OppScore = LScore) %>%
+    mutate(Outcome = 1)
+  
+  df_losses <- df_compact_results %>%
+    select(Season, TeamID = LTeamID, Score = LScore, OppScore = WScore) %>%
+    mutate(Outcome = 0)
+  
+  df_stats <- bind_rows(df_wins, df_losses) %>%
+    group_by(Season, TeamID) %>%
+    summarise(
+      TotalGames = n(),
+      Wins = sum(Outcome),
+      TotalPointsScored = sum(Score),
+      TotalPointsAllowed = sum(OppScore),
+      .groups = 'drop'
+    ) %>%
+    mutate(
+      WinRate = Wins / TotalGames,
+      OffDefMargin = (TotalPointsScored - TotalPointsAllowed) / TotalGames
+    ) %>%
+    rename_with(~ paste0(stats_prefix, .), 
+                c(TotalGames, Wins, WinRate, OffDefMargin)) %>%
+    select(Season, TeamID, ends_with("WinRate"), ends_with("OffDefMargin"))
+  
+  return(df_stats)
+}
+
+df_regular_stats <- prepare_compact_stats(df_regular_results, "Reg_")
+
+cat("\n--- 常规赛统计数据已成功计算 ---\n")
+print(head(df_regular_stats))
+
+df_conf_results_with_scores <- df_conf_games %>%
+  inner_join(df_regular_results, 
+             by = c("Season", "DayNum", "WTeamID", "LTeamID")) %>%
+  select(Season, DayNum, WTeamID, LTeamID, WScore, LScore)
+
+
+df_conf_stats <- prepare_compact_stats(df_conf_results_with_scores, "Conf_") %>%
+  select(Season, TeamID, Conf_WinRate) 
+
+cat("\n--- 联盟锦标赛统计数据（近期状态）已成功计算 ---\n")
+print(head(df_conf_stats))
+
+df_seeds_cleaned <- df_seeds %>%
+  mutate(
+    Seed_Num = as.integer(str_sub(Seed, 2, 3))
+  ) %>%
+  select(Season, TeamID, Seed_Num)
+
+cat("\n--- 锦标赛种子数据处理已完成 ---\n")
+print(head(df_seeds_cleaned))
+
+df_A_wins <- df_tourney_results %>%
+  mutate(Target = 1, TeamA = WTeamID, TeamB = LTeamID) %>%
+  select(Season, DayNum, TeamA, TeamB, Target)
+
+df_A_loses <- df_tourney_results %>%
+  mutate(Target = 0, TeamA = LTeamID, TeamB = WTeamID) %>%
+  select(Season, DayNum, TeamA, TeamB, Target)
+
+df_base <- bind_rows(df_A_wins, df_A_loses) %>%
+  arrange(Season, DayNum, TeamA)
+
+cat("\n--- 基础预测数据集已构建 ---\n")
+print(head(df_base))
+print(str(df_base))
+```
+
+```{r}
+# Load necessary libraries
+library(tidyverse) 
+df_seed_counts_all <- df_champion_seeds %>%
+  group_by(Seed_Num) %>%
+  summarise(
+    Count = n(),             # Number of times this seed won the championship
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Percentage = Count / sum(Count) * 100, # Calculate percentage
+    Seed_Label = as.character(Seed_Num)    # Keep all seeds as their number
+  ) %>%
+  arrange(Seed_Num) 
+
+cat("--- Historical Champion Seed Distribution (All Seeds) ---\n")
+print(df_seed_counts_all)
+
+df_seed_counts_all <- df_seed_counts_all %>%
+  mutate(
+    Legend_Label = paste0(
+      "Seed ", Seed_Num, " (", 
+      format(round(Percentage, 1), nsmall=1), "%)"
+    )
+  )
+
+p_all_seeds <- ggplot(df_seed_counts_all, aes(x = "", y = Percentage, fill = Seed_Label)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0) + 
+  
+  labs(
+    title = paste0("NCAA Men's Basketball Historical Champion Seed Distribution (All Seeds, 1985-", max(df_champion_seeds$Season), ")"),
+    fill = "Seed Ranking (Percentage of Wins)",
+    caption = paste0("Total Champions: ", nrow(df_champion_seeds))
+  ) +
+  theme_void() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "bottom", 
+    legend.box = "vertical",
+    legend.text = element_text(size = 9)
+  ) +
+  scale_fill_manual(
+    values = setNames(
+        scales::hue_pal()(length(df_seed_counts_all$Seed_Label)), 
+        df_seed_counts_all$Seed_Label
+    ),
+    labels = df_seed_counts_all$Legend_Label
+  )
+print(p_all_seeds)
+```
+
+```{r}
+library(tidyverse)
+
+prepare_model_data <- function(results, seeds) {
+
+  df <- results %>% 
+    select(Season, WTeamID, LTeamID)
+
+  df <- df %>%
+    left_join(seeds, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(WSeed = Seed_Num)
+
+  df <- df %>%
+    left_join(seeds, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(LSeed = Seed_Num)
+
+  df_wins <- df %>%
+    mutate(
+      TeamA_ID = WTeamID, TeamA_Seed = WSeed,
+      TeamB_ID = LTeamID, TeamB_Seed = LSeed,
+      Seed_Diff = TeamB_Seed - TeamA_Seed, 
+      Result = 1
+    ) %>%
+
+    select(Season, TeamA_ID, TeamB_ID, TeamA_Seed, TeamB_Seed, Seed_Diff, Result, any_of("Region"))
+
+  df_losses <- df %>%
+    mutate(
+      TeamA_ID = LTeamID, TeamA_Seed = LSeed,
+      TeamB_ID = WTeamID, TeamB_Seed = WSeed,
+      Seed_Diff = TeamB_Seed - TeamA_Seed, 
+      Result = 0
+    ) %>%
+    select(Season, TeamA_ID, TeamB_ID, TeamA_Seed, TeamB_Seed, Seed_Diff, Result, any_of("Region"))
+
+  df_final <- bind_rows(df_wins, df_losses)
+  return(df_final)
+}
+
+model_data <- prepare_model_data(df_tourney_results, df_seeds_cleaned)
+
+
+train_df <- model_data %>% filter(Season < 2019)
+test_df  <- model_data %>% filter(Season >= 2019)
+
+cat("\n--- 开始训练 Logistic 回归模型 ---\n")
+
+glm_model <- glm(Result ~ Seed_Diff, 
+                 data = train_df, 
+                 family = binomial(link = "logit"))
+
+print(summary(glm_model))
+
+cat("\n--- test ---\n")
+
+test_df$Pred_Prob <- predict(glm_model, newdata = test_df, type = "response")
+test_df$Pred_Outcome <- ifelse(test_df$Pred_Prob > 0.5, 1, 0)
+accuracy <- mean(test_df$Pred_Outcome == test_df$Result)
+
+cat(paste0("accuracy: ", round(accuracy * 100, 2), "%\n"))
+```
+
+```{r}
+library(tidyverse)
+
+# --- 1. Data Reconstruction (Safe Re-build) ---
+# We assume 'df_seeds' (raw data) is in your environment.
+# If not, uncomment the read.csv line below.
+
+analyze_region_safe_en <- function() {
+  
+  # A. Attempt to get raw seed data
+  if (exists("df_seeds")) {
+    raw_seeds <- df_seeds
+  } else if (file.exists("MNCAATourneySeeds.csv")) {
+    raw_seeds <- read.csv("MNCAATourneySeeds.csv")
+  } else {
+    stop("❌ Raw seed data not found! Please ensure 'df_seeds' exists or the CSV is in the working directory.")
+  }
+  
+  # B. Clean and Extract Region
+  # The raw Seed format is usually "W01", "Z16", etc. The first letter is the Region.
+  df_seeds_viz <- raw_seeds %>%
+    mutate(
+      Region = substr(Seed, 1, 1),           # Extract first letter as Region code
+      Seed_Num = as.integer(substr(Seed, 2, 3)) # Extract number as Seed
+    ) %>%
+    select(Season, TeamID, Region, Seed_Num) # Select specific columns, ensuring Region is kept!
+  
+  # C. Get Tournament Results
+  if (exists("df_tourney_results")) {
+    raw_results <- df_tourney_results
+  } else {
+    stop("❌ Tournament results data 'df_tourney_results' not found.")
+  }
+  
+  # D. Merge Data (Focus on Winners)
+  df_final <- raw_results %>%
+    select(Season, DayNum, WTeamID) %>%
+    left_join(df_seeds_viz, by = c("Season", "WTeamID" = "TeamID")) %>%
+    filter(!is.na(Region)) # Filter out rows where Region might be missing
+    
+  return(df_final)
+}
+
+# Run the function
+df_region_analysis <- analyze_region_safe_en()
+
+cat("✅ Data reconstruction successful! 'Region' column is now present.\n")
+head(df_region_analysis)
+
+# --- 2. Analysis: Which Region is the Strongest? ---
+
+# Identify the champion for every season (Last game of the tournament)
+champions <- df_region_analysis %>%
+  group_by(Season) %>%
+  filter(DayNum == max(DayNum)) %>% 
+  ungroup() %>%
+  count(Region, name = "Championships") %>%
+  arrange(desc(Championships))
+
+print(champions)
+
+# --- 3. Visualization ---
+
+ggplot(champions, aes(x = reorder(Region, -Championships), y = Championships, fill = Region)) +
+  geom_col(width = 0.7, color = "black") +
+  geom_text(aes(label = Championships), vjust = -0.5, size = 5, fontface = "bold") +
+  labs(
+    title = "NCAA Historical Region Strength",
+    subtitle = "Total Championships produced by each Region Code (W/X/Y/Z)",
+    x = "Region Code",
+    y = "Total Championships"
+  ) +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    axis.text = element_text(size = 12),
+    legend.position = "none"
+  )
+```
+
+```{r}
+install.packages("xgboost")
+library(tidyverse)
+library(xgboost)
+
+prepare_final_data <- function() {
+
+  if (!exists("df_seeds")) df_seeds <- read.csv("MNCAATourneySeeds.csv")
+  if (!exists("df_tourney_results")) df_tourney_results <- df_tourney_results 
+
+  seeds_clean <- df_seeds %>%
+    mutate(
+      Region_Code = as.numeric(as.factor(substr(Seed, 1, 1))), 
+      Seed_Num = as.integer(substr(Seed, 2, 3))
+    ) %>%
+    select(Season, TeamID, Region_Code, Seed_Num)
+
+  results <- df_tourney_results %>% select(Season, WTeamID, LTeamID)
+
+  df_wins <- results %>%
+    left_join(seeds_clean, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(TeamA_Seed = Seed_Num, TeamA_Region = Region_Code) %>%
+    left_join(seeds_clean, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(TeamB_Seed = Seed_Num, TeamB_Region = Region_Code) %>%
+    mutate(Seed_Diff = TeamB_Seed - TeamA_Seed, Result = 1)
+
+  df_losses <- results %>%
+    left_join(seeds_clean, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(TeamA_Seed = Seed_Num, TeamA_Region = Region_Code) %>%
+    left_join(seeds_clean, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(TeamB_Seed = Seed_Num, TeamB_Region = Region_Code) %>%
+    mutate(Seed_Diff = TeamB_Seed - TeamA_Seed, Result = 0)
+
+  bind_rows(df_wins, df_losses) %>% 
+    select(Season, Seed_Diff, TeamA_Seed, TeamB_Seed, TeamA_Region, Result)
+}
+
+final_data <- prepare_final_data()
+
+train_set <- final_data %>% filter(Season < 2019)
+test_set  <- final_data %>% filter(Season >= 2019)
+
+dtrain <- xgb.DMatrix(data = as.matrix(train_set %>% select(-Season, -Result)), label = train_set$Result)
+dtest  <- xgb.DMatrix(data = as.matrix(test_set %>% select(-Season, -Result)), label = test_set$Result)
+
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "error",
+  max_depth = 4, 
+  eta = 0.05,
+  subsample = 0.8
+)
+
+
+bst_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 200,
+  watchlist = list(train = dtrain, test = dtest),
+  print_every_n = 50,
+  early_stopping_rounds = 20
+)
+
+preds <- predict(bst_model, dtest)
+pred_labels <- ifelse(preds > 0.5, 1, 0)
+accuracy <- mean(pred_labels == test_set$Result)
+
+cat("\n==========================================\n")
+cat(sprintf(" Logistic回归基准: 67.37%%\n"))
+cat(sprintf(" XGBoost 最终准确率: %.2f%%\n", accuracy * 100))
+cat("==========================================\n")
+
+importance <- xgb.importance(model = bst_model)
+print(xgb.plot.importance(importance_matrix = importance, top_n = 5))
+```
+
+```{r}
+library(tidyverse)
+library(xgboost)
+
+# --- Function to aggregate Regular Season Statistics ---
+process_regular_season <- function() {
+  
+  # Check if the necessary file exists
+  if (file.exists("MRegularSeasonCompactResults.csv")) {
+    df_reg <- read.csv("MRegularSeasonCompactResults.csv")
+  } else {
+    stop("rror: 'MRegularSeasonCompactResults.csv' not found! Please ensure the file is in the working directory.")
+  }
+  
+  # 1. Process data from the Winner's perspective
+  df_w <- df_reg %>%
+    select(Season, TeamID = WTeamID, Score = WScore, OppScore = LScore) %>%
+    mutate(Win = 1)
+  
+  # 2. Process data from the Loser's perspective
+  df_l <- df_reg %>%
+    select(Season, TeamID = LTeamID, Score = LScore, OppScore = WScore) %>%
+    mutate(Win = 0)
+  
+  # 3. Combine and aggregate stats per team per season
+  # Metrics: Win Ratio, Average Points Scored, Average Points Allowed
+  df_stats <- bind_rows(df_w, df_l) %>%
+    group_by(Season, TeamID) %>%
+    summarise(
+      WinRatio = mean(Win),                  
+      AvgPoints = mean(Score),               
+      AvgPointsAllowed = mean(OppScore),     
+      .groups = "drop"
+    )
+  
+  return(df_stats)
+}
+
+# Generate team statistics
+df_team_stats <- process_regular_season()
+head(df_team_stats) 
+
+# --- Function to merge Seeds, Stats and create Model Features ---
+prepare_advanced_data <- function(stats, seeds, results) {
+  
+  # Parse Seed strings to extract Region and Seed Number
+  seeds_clean <- seeds %>%
+    mutate(
+      Region_Code = as.numeric(as.factor(substr(Seed, 1, 1))), 
+      Seed_Num = as.integer(substr(Seed, 2, 3))
+    ) %>% select(Season, TeamID, Region_Code, Seed_Num)
+  
+  # 1. Create dataset from Winner's perspective (Label = 1)
+  df_wins <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    # Join Winner's Stats/Seeds
+    left_join(seeds_clean, by = c("Season", "WTeamID" = "TeamID")) %>%
+    left_join(stats, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(A_Seed = Seed_Num, A_Reg = Region_Code, A_WinRat = WinRatio, A_Pts = AvgPoints, A_Allowed = AvgPointsAllowed) %>%
+    # Join Loser's Stats/Seeds
+    left_join(seeds_clean, by = c("Season", "LTeamID" = "TeamID")) %>%
+    left_join(stats, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(B_Seed = Seed_Num, B_Reg = Region_Code, B_WinRat = WinRatio, B_Pts = AvgPoints, B_Allowed = AvgPointsAllowed) %>%
+    mutate(Result = 1) 
+  
+  # 2. Create dataset from Loser's perspective (Label = 0)
+  df_losses <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    # Join Loser as Team A
+    left_join(seeds_clean, by = c("Season", "LTeamID" = "TeamID")) %>%
+    left_join(stats, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(A_Seed = Seed_Num, A_Reg = Region_Code, A_WinRat = WinRatio, A_Pts = AvgPoints, A_Allowed = AvgPointsAllowed) %>%
+    # Join Winner as Team B
+    left_join(seeds_clean, by = c("Season", "WTeamID" = "TeamID")) %>%
+    left_join(stats, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(B_Seed = Seed_Num, B_Reg = Region_Code, B_WinRat = WinRatio, B_Pts = AvgPoints, B_Allowed = AvgPointsAllowed) %>%
+    mutate(Result = 0) 
+  
+  # 3. Feature Engineering: Calculate Differentials (Team A - Team B)
+  bind_rows(df_wins, df_losses) %>%
+    mutate(
+      Seed_Diff = B_Seed - A_Seed,          # Positive means Team A has a better seed
+      WinRatio_Diff = A_WinRat - B_WinRat,  # Win Rate difference      
+      Points_Diff = A_Pts - B_Pts,          # Offensive difference        
+      Defense_Diff = B_Allowed - A_Allowed  # Defensive difference      
+    ) %>%
+    select(Season, Result, Seed_Diff, WinRatio_Diff, Points_Diff, Defense_Diff, A_Seed, B_Seed)
+}
+
+# Execute Data Preparation
+df_final_advanced <- prepare_advanced_data(df_team_stats, df_seeds, df_tourney_results)
+
+# --- Train/Test Split & Matrix Conversion ---
+# Splitting by year (Pre-2019 for training) to avoid data leakage
+train_adv <- df_final_advanced %>% filter(Season < 2019)
+test_adv  <- df_final_advanced %>% filter(Season >= 2019)
+
+# Convert to XGBoost DMatrix format
+# Exclude 'Season' and 'Result' from features
+dtrain_adv <- xgb.DMatrix(data = as.matrix(train_adv %>% select(-Season, -Result)), label = train_adv$Result)
+dtest_adv  <- xgb.DMatrix(data = as.matrix(test_adv %>% select(-Season, -Result)), label = test_adv$Result)
+
+# --- XGBoost Model Training ---
+params_adv <- list(
+  objective = "binary:logistic", # Binary classification
+  eval_metric = "error",
+  max_depth = 5,                 # Tree depth
+  eta = 0.03,                    # Learning rate
+  subsample = 0.7,               # Row sampling to prevent overfitting
+  colsample_bytree = 0.8         # Column sampling
+)
+
+bst_adv <- xgb.train(
+  params = params_adv,
+  data = dtrain_adv,
+  nrounds = 500,                 
+  watchlist = list(train = dtrain_adv, test = dtest_adv),
+  print_every_n = 50,
+  early_stopping_rounds = 30
+)
+
+# --- Prediction & Evaluation ---
+preds_adv <- predict(bst_adv, dtest_adv)
+
+# Calculate Accuracy (Threshold > 0.5)
+acc_adv <- mean(ifelse(preds_adv > 0.5, 1, 0) == test_adv$Result)
+
+cat("\n==========================================\n")
+cat(sprintf(" Pure Seed Model Accuracy: 67.51%%\n"))
+cat(sprintf(" Advanced Model (Regular Season Data) Accuracy: %.2f%%\n", acc_adv * 100))
+cat("==========================================\n")
+
+# --- Feature Importance Plot ---
+importance <- xgb.importance(model = bst_adv)
+print(xgb.plot.importance(importance_matrix = importance, top_n = 10))
+```
+
+```{r}
+library(tidyverse)
+library(xgboost)
+
+# 1. Process Expert Rankings (The Secret Weapon) 
+process_ordinals <- function() {
+  
+  # Check if the Massey Ordinals file exists
+  if (!file.exists("MMasseyOrdinals.csv")) {
+    stop("Error: 'MMasseyOrdinals.csv' not found! This file is critical for breaking the performance bottleneck.")
+  }
+  
+  df_ordinals <- read.csv("MMasseyOrdinals.csv")
+  
+  # Filter for specific high-quality systems and calculate consensus rank
+  # We select authoritative systems like Pomeroy (POM), Sagarin (SAG), etc.
+  df_rank_final <- df_ordinals %>%
+    filter(SystemName %in% c("POM", "SAG", "MOR", "WLK")) %>% 
+    group_by(Season, TeamID) %>%
+    summarise(
+      Mean_Rank = mean(OrdinalRank), # Calculate average rank (1-362)
+      .groups = "drop"
+    )
+  
+  return(df_rank_final)
+}
+
+# 2. Data Integration (Seeds + Rankings)
+prepare_pro_data <- function(ranks, seeds, results) {
+  
+  # Prepare Seed data
+  seeds_clean <- seeds %>%
+    mutate(Seed_Num = as.integer(substr(Seed, 2, 3))) %>%
+    select(Season, TeamID, Seed_Num)
+  
+  # 1. Perspective: Winner (Label = 1)
+  df_wins <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    left_join(ranks, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(A_Rank = Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(B_Rank = Mean_Rank) %>%
+    left_join(seeds_clean, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(A_Seed = Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(B_Seed = Seed_Num) %>%
+    mutate(Result = 1)
+  
+  # 2. Perspective: Loser (Label = 0)
+  df_losses <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    left_join(ranks, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(A_Rank = Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(B_Rank = Mean_Rank) %>%
+    left_join(seeds_clean, by = c("Season", "LTeamID" = "TeamID")) %>%
+    rename(A_Seed = Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "WTeamID" = "TeamID")) %>%
+    rename(B_Seed = Seed_Num) %>%
+    mutate(Result = 0)
+  
+  # 3. Construct Core Features: Rank Differential
+  df_final <- bind_rows(df_wins, df_losses) %>%
+    filter(!is.na(A_Rank) & !is.na(B_Rank)) %>% # Remove rows with missing rankings
+    mutate(
+      Rank_Diff = B_Rank - A_Rank,   # Rank Differential (Key Feature)
+      Seed_Diff = B_Seed - A_Seed    # Seed Differential
+    ) %>%
+    select(Season, Result, Rank_Diff, Seed_Diff, A_Rank, B_Rank)
+    
+  return(df_final)
+}
+
+# 3. Execution 
+
+
+df_ranks <- process_ordinals() 
+df_pro_data <- prepare_pro_data(df_ranks, df_seeds, df_tourney_results)
+
+# 4. Train Kaggle-Level XGBoost Model 
+
+# Split data: Train on pre-2019, Test on 2019+
+train_set <- df_pro_data %>% filter(Season < 2019)
+test_set  <- df_pro_data %>% filter(Season >= 2019)
+
+dtrain <- xgb.DMatrix(data = as.matrix(train_set %>% select(-Season, -Result)), label = train_set$Result)
+dtest  <- xgb.DMatrix(data = as.matrix(test_set %>% select(-Season, -Result)), label = test_set$Result)
+
+# Hyperparameters (Aggressive tuning similar to top Notebooks)
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss", 
+  max_depth = 3,           
+  eta = 0.02,              
+  subsample = 0.7,
+  colsample_bytree = 0.7
+)
+bst_pro <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 1000,          
+  watchlist = list(train = dtrain, test = dtest),
+  print_every_n = 100,
+  early_stopping_rounds = 50
+)
+
+# 5. Evaluation 
+preds <- predict(bst_pro, dtest)
+acc <- mean(ifelse(preds > 0.5, 1, 0) == test_set$Result)
+
+cat(sprintf("\n Accuracy with Expert Rankings: %.2f%%\n", acc * 100))
+
+# Plot Feature Importance
+importance <- xgb.importance(model = bst_pro)
+print(xgb.plot.importance(importance_matrix = importance))
+```
+
+```{r}
+library(tidyverse)
+library(xgboost)
+
+# 1. Calculate Team Momentum 
+# Logic: Calculate win rate for the last 14 days of the regular season (DayNum > 118)
+# Purpose: Capture recent form entering the tournament
+get_momentum <- function() {
+  if (!file.exists("MRegularSeasonCompactResults.csv")) {
+    stop("Error: 'MRegularSeasonCompactResults.csv' not found.")
+  }
+  
+  df_reg <- read.csv("MRegularSeasonCompactResults.csv")
+  
+  # Winner perspective
+  df_w <- df_reg %>% 
+    filter(DayNum > 118) %>% 
+    select(Season, TeamID = WTeamID) %>% 
+    mutate(Win = 1)
+  
+  # Loser perspective
+  df_l <- df_reg %>% 
+    filter(DayNum > 118) %>% 
+    select(Season, TeamID = LTeamID) %>% 
+    mutate(Win = 0)
+  
+  # Aggregate recent performance
+  momentum <- bind_rows(df_w, df_l) %>%
+    group_by(Season, TeamID) %>%
+    summarise(Last14_WinRate = mean(Win), .groups = "drop")
+  
+  return(momentum)
+}
+
+# 2. Calculate Head-to-Head (H2H) Records 
+# Logic: Identify if Team A defeated Team B during the current regular season
+get_h2h <- function() {
+  df_reg <- read.csv("MRegularSeasonCompactResults.csv")
+  
+  # Create a record of matchups: Season, WTeamID (Winner), LTeamID (Loser)
+  h2h_games <- df_reg %>%
+    select(Season, WTeamID, LTeamID) %>%
+    mutate(H2H_Val = 1) # Indicator that WTeamID defeated LTeamID
+  
+  return(h2h_games)
+}
+
+#3. Feature Aggregation
+prepare_final_battle_data <- function(seeds, results, ranks, momentum, h2h) {
+  
+  seeds_clean <- seeds %>%
+    mutate(Seed_Num = as.integer(substr(Seed, 2, 3))) %>%
+    select(Season, TeamID, Seed_Num)
+  
+  # 1. Perspective: Winner (Label = 1)
+  df_wins <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    mutate(Result = 1) %>%
+    # Join Seeds
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    # Join Ranks
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    # Join Momentum
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    # Join H2H (Direct join to check if WTeam beat LTeam)
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, 1)) # 1 indicates Team A beat Team B in regular season
+  
+  # 2. Perspective: Loser (Label = 0)
+  df_losses <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    mutate(Result = 0) %>%
+    # Join Seeds (A = Loser, B = Winner)
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    # Join Ranks
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    # Join Momentum
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    # Join H2H (Check if Winner beat Loser, which means B beat A)
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, -1)) # -1 indicates Team A lost to Team B in regular season
+  
+  # 3. Merge and Clean
+  final <- bind_rows(df_wins, df_losses) %>%
+    replace_na(list(A_Mom = 0.5, B_Mom = 0.5)) %>% # Default 50% momentum if no recent games
+    mutate(
+      Seed_Diff = B_Seed - A_Seed,
+      Rank_Diff = B_Rank - A_Rank,
+      Mom_Diff  = A_Mom - B_Mom,       # Momentum Differential
+      H2H_Advantage = replace_na(H2H_Advantage, 0)
+    ) %>%
+    select(Season, Result, Seed_Diff, Rank_Diff, Mom_Diff, H2H_Advantage)
+  
+  return(final)
+}
+
+#4. Execution and Training
+
+cat("Computing Momentum and H2H features...\n")
+df_mom <- get_momentum()
+df_h2h <- get_h2h()
+
+# Ensure df_ranks is available from the previous step
+if(!exists("df_ranks")) {
+    stop("df_ranks object not found. Please run the ranking processing function first.")
+}
+
+df_final_v3 <- prepare_final_battle_data(df_seeds, df_tourney_results, df_ranks, df_mom, df_h2h)
+
+# Split Training and Testing sets
+train_v3 <- df_final_v3 %>% filter(Season < 2019)
+test_v3  <- df_final_v3 %>% filter(Season >= 2019)
+
+dtrain_v3 <- xgb.DMatrix(data = as.matrix(train_v3 %>% select(-Season, -Result)), label = train_v3$Result)
+dtest_v3  <- xgb.DMatrix(data = as.matrix(test_v3 %>% select(-Season, -Result)), label = test_v3$Result)
+
+# Hyperparameters
+params_v3 <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 4,   # Increased depth to capture interaction between Momentum and Rank
+  eta = 0.02,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+cat("Starting training for Momentum-Enhanced XGBoost model...\n")
+bst_v3 <- xgb.train(
+  params = params_v3,
+  data = dtrain_v3,
+  nrounds = 1000,
+  watchlist = list(train = dtrain_v3, test = dtest_v3),
+  print_every_n = 100,
+  early_stopping_rounds = 50
+)
+
+# --- 5. Evaluation ---
+preds_v3 <- predict(bst_v3, dtest_v3)
+acc_v3 <- mean(ifelse(preds_v3 > 0.5, 1, 0) == test_v3$Result)
+
+cat("\n==========================================\n")
+cat(sprintf(" Previous Model Accuracy: 69.31%%\n"))
+cat(sprintf(" Momentum Enhanced Model Accuracy: %.2f%%\n", acc_v3 * 100))
+cat("==========================================\n")
+
+# Feature Importance Plot
+importance <- xgb.importance(model = bst_v3)
+print(xgb.plot.importance(importance_matrix = importance))
+```
+
+```{r}
+if (!requireNamespace("randomForest", quietly = TRUE)) {
+  install.packages("randomForest")
+}
+library(randomForest)
+library(tidyverse)
+# Critical Step: Random Forest requires the target variable to be a 'Factor' 
+# to perform Classification. If left as numeric (0/1), it defaults to Regression.
+
+prepare_rf_data <- function(df) {
+  df %>%
+    mutate(Result = as.factor(Result)) %>% # Explicitly convert target to factor
+    select(Result, Seed_Diff, Rank_Diff, Mom_Diff, H2H_Advantage)
+}
+
+# Ensure the datasets from the previous XGBoost step exist
+if(!exists("train_v3") || !exists("test_v3")) {
+  stop("Error: Pre-processed dataframes 'train_v3' and 'test_v3' not found in environment.")
+}
+
+# Apply preparation function
+train_rf_data <- prepare_rf_data(train_v3)
+test_rf_data  <- prepare_rf_data(test_v3)
+
+cat("Initializing Random Forest training (500 trees)...\n")
+set.seed(2025) # Set seed for reproducibility
+rf_model <- randomForest(
+  Result ~ .,                # Use all available features in the dataframe
+  data = train_rf_data,
+  ntree = 500,               # Number of trees to grow
+  mtry = 2,                  # Number of variables randomly sampled as candidates at each split
+  importance = TRUE,         # Assess importance of predictors
+  na.action = na.roughfix    # Impute missing values (if any) using median/mode
+)
+
+# Generate class predictions (0 or 1)
+rf_preds <- predict(rf_model, test_rf_data)
+
+# Calculate Accuracy
+rf_acc <- mean(rf_preds == test_rf_data$Result)
+
+cat("\n==========================================\n")
+cat(sprintf(" XGBoost Model Accuracy: 69.61%%\n")) # Reference benchmark
+cat(sprintf(" Random Forest Model Accuracy: %.2f%%\n", rf_acc * 100))
+cat("==========================================\n")
+
+# Plot feature importance to compare with XGBoost results
+varImpPlot(rf_model, main = "Random Forest Feature Importance")
+```
+
+```{r}
+library(tidyverse)
+library(xgboost)
+
+#1. Calculate Average Score Margin (Point Differential) 
+# Methodology: Calculate the average point differential for each team per season.
+# This metric (Margin of Victory) is often a stronger predictor of future success than win/loss record.
+get_score_margin <- function() {
+  
+  # Validate dataset availability
+  if (!file.exists("MRegularSeasonCompactResults.csv")) {
+    stop("Error: 'MRegularSeasonCompactResults.csv' file missing.")
+  }
+  
+  df_reg <- read.csv("MRegularSeasonCompactResults.csv")
+  
+  # Process Winner Statistics: Positive differential
+  df_w <- df_reg %>% 
+    select(Season, TeamID = WTeamID, Score = WScore, OppScore = LScore) %>%
+    mutate(Diff = Score - OppScore) 
+  
+  # Process Loser Statistics: Negative differential
+  df_l <- df_reg %>% 
+    select(Season, TeamID = LTeamID, Score = LScore, OppScore = WScore) %>%
+    mutate(Diff = Score - OppScore) 
+  
+  # Aggregate to get Average Scoring Margin per season
+  margin <- bind_rows(df_w, df_l) %>%
+    group_by(Season, TeamID) %>%
+    summarise(
+      Avg_Score_Diff = mean(Diff), # Key Feature: Average Margin
+      .groups = "drop"
+    )
+  
+  return(margin)
+}
+
+#  2. Enhanced Feature Aggregation Function 
+# Merges Seeds, Rankings, Momentum, H2H, and now Score Margin
+
+prepare_final_data_v4 <- function(seeds, results, ranks, momentum, h2h, margin) {
+  
+  seeds_clean <- seeds %>%
+    mutate(Seed_Num = as.integer(substr(Seed, 2, 3))) %>%
+    select(Season, TeamID, Seed_Num)
+  
+  # 1. Perspective: Winner (Label = 1)
+  df_wins <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    mutate(Result = 1) %>%
+    # Join Seeds
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    # Join Ranks
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    # Join Momentum
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    # Join H2H
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, 1)) %>%
+    # Join Score Margin (New Feature)
+    left_join(margin, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Margin=Avg_Score_Diff) %>%
+    left_join(margin, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Margin=Avg_Score_Diff)
+  
+  # 2. Perspective: Loser (Label = 0)
+  df_losses <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    mutate(Result = 0) %>%
+    # Join Seeds
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    # Join Ranks
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    # Join Momentum
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    # Join H2H
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, -1)) %>%
+    # Join Score Margin
+    left_join(margin, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Margin=Avg_Score_Diff) %>%
+    left_join(margin, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Margin=Avg_Score_Diff)
+
+  # 3. Final Cleaning and Feature Engineering
+  final <- bind_rows(df_wins, df_losses) %>%
+    replace_na(list(A_Mom=0.5, B_Mom=0.5, A_Margin=0, B_Margin=0)) %>%
+    mutate(
+      Seed_Diff = B_Seed - A_Seed,
+      Rank_Diff = B_Rank - A_Rank,
+      Mom_Diff  = A_Mom - B_Mom,
+      Margin_Diff = A_Margin - B_Margin, # Feature: Difference in Average Scoring Margin
+      H2H_Advantage = replace_na(H2H_Advantage, 0)
+    ) %>%
+    select(Season, Result, Seed_Diff, Rank_Diff, Mom_Diff, Margin_Diff, H2H_Advantage)
+  
+  return(final)
+}
+
+#3. Model Training (Score Margin Enhanced - V4) 
+
+cat("Computing Average Score Margins...\n")
+df_margin <- get_score_margin()
+
+# Dependency Check: Ensure previous feature sets exist in environment
+if(!exists("df_ranks")) df_ranks <- process_ordinals() 
+if(!exists("df_mom")) df_mom <- get_momentum()
+if(!exists("df_h2h")) df_h2h <- get_h2h()
+
+cat("Consolidating all features...\n")
+df_final_v4 <- prepare_final_data_v4(df_seeds, df_tourney_results, df_ranks, df_mom, df_h2h, df_margin)
+
+# Split Training and Testing Sets
+train_v4 <- df_final_v4 %>% filter(Season < 2019)
+test_v4  <- df_final_v4 %>% filter(Season >= 2019)
+
+dtrain_v4 <- xgb.DMatrix(data = as.matrix(train_v4 %>% select(-Season, -Result)), label = train_v4$Result)
+dtest_v4  <- xgb.DMatrix(data = as.matrix(test_v4 %>% select(-Season, -Result)), label = test_v4$Result)
+
+# Hyperparameter Tuning
+# Note: Lower eta and shallow depth used to prevent overfitting given the strong predictive power of Margin_Diff
+params_v4 <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 3,    # Shallow trees preferred for robust generalization
+  eta = 0.02,
+  subsample = 0.7,
+  colsample_bytree = 0.7
+)
+
+cat("Starting training for V4 Model (Score Margin Enhanced)...\n")
+bst_v4 <- xgb.train(
+  params = params_v4,
+  data = dtrain_v4,
+  nrounds = 1500, # Increased rounds to accommodate low learning rate
+  watchlist = list(train = dtrain_v4, test = dtest_v4),
+  print_every_n = 100,
+  early_stopping_rounds = 50
+)
+
+# Final Evaluation
+preds_v4 <- predict(bst_v4, dtest_v4)
+acc_v4 <- mean(ifelse(preds_v4 > 0.5, 1, 0) == test_v4$Result)
+
+cat("\n==========================================\n")
+cat(sprintf(" Previous Model (V3) Accuracy: 69.61%%\n"))
+cat(sprintf(" Score Margin Model (V4) Accuracy: %.2f%%\n", acc_v4 * 100))
+cat("==========================================\n")
+
+# Feature Importance Visualization
+importance <- xgb.importance(model = bst_v4)
+print(xgb.plot.importance(importance_matrix = importance))
+```
+
+```{r}
+library(tidyverse)
+library(xgboost)
+
+# 1. Calculate Strength of Schedule (SOS)
+# Methodology: Calculate the average Massey Ordinal Rank of all opponents faced during the regular season.
+# Logic: A lower average opponent rank indicates a more difficult schedule (played against stronger teams).
+# A higher average indicates a "softer" schedule.
+
+get_sos_adjusted <- function() {
+  cat("Calculating Strength of Schedule (SOS)...\n")
+  
+  if (!file.exists("MRegularSeasonCompactResults.csv")) {
+    stop("Error: 'MRegularSeasonCompactResults.csv' file missing.")
+  }
+  
+  df_reg <- read.csv("MRegularSeasonCompactResults.csv")
+  
+  # Check for dependency: df_ranks must exist from the previous step
+  if(!exists("df_ranks")) {
+     # Attempt to call the processing function if it exists in the environment
+     if(exists("process_ordinals")) {
+         df_ranks <- process_ordinals()
+     } else {
+         stop("Error: 'df_ranks' object not found. Please process rankings first.")
+     }
+  }
+  
+  # 1. Create Rank Lookup Table
+  rank_lookup <- df_ranks %>% select(Season, TeamID, Rank=Mean_Rank)
+  
+  # 2. Winner Perspective: Opponent was the Loser
+  df_w <- df_reg %>%
+    select(Season, TeamID = WTeamID, OpponentID = LTeamID) %>%
+    left_join(rank_lookup, by = c("Season", "OpponentID"="TeamID"))
+  
+  # 3. Loser Perspective: Opponent was the Winner
+  df_l <- df_reg %>%
+    select(Season, TeamID = LTeamID, OpponentID = WTeamID) %>%
+    left_join(rank_lookup, by = c("Season", "OpponentID"="TeamID"))
+  
+  # 4. Aggregate
+  # Impute missing ranks with 150 (average team strength) to prevent NAs
+  sos <- bind_rows(df_w, df_l) %>%
+    replace_na(list(Rank = 150)) %>%
+    group_by(Season, TeamID) %>%
+    summarise(
+      SOS_Opp_Rank = mean(Rank), # Average Rank of Opponents
+      .groups = "drop"
+    )
+  
+  return(sos)
+}
+
+# 2. Update Feature Aggregation Function (V5) ---
+# Now includes: Seeds, Ranks, Momentum, H2H, Margin, and SOS
+
+prepare_final_data_v5 <- function(seeds, results, ranks, momentum, h2h, margin, sos) {
+  
+  seeds_clean <- seeds %>%
+    mutate(Seed_Num = as.integer(substr(Seed, 2, 3))) %>%
+    select(Season, TeamID, Seed_Num)
+  
+  # 1. Perspective: Winner (Label = 1)
+  df_wins <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    mutate(Result = 1) %>%
+    # Join Seeds
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    # Join Ranks
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    # Join Momentum
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    # Join H2H
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, 1)) %>%
+    # Join Margin
+    left_join(margin, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Margin=Avg_Score_Diff) %>%
+    left_join(margin, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Margin=Avg_Score_Diff) %>%
+    # Join SOS (New Feature)
+    left_join(sos, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_SOS=SOS_Opp_Rank) %>%
+    left_join(sos, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_SOS=SOS_Opp_Rank)
+  
+  # 2. Perspective: Loser (Label = 0)
+  df_losses <- results %>%
+    select(Season, WTeamID, LTeamID) %>%
+    mutate(Result = 0) %>%
+    # Join Seeds
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    # Join Ranks
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    # Join Momentum
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    # Join H2H
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, -1)) %>%
+    # Join Margin
+    left_join(margin, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Margin=Avg_Score_Diff) %>%
+    left_join(margin, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Margin=Avg_Score_Diff) %>%
+    # Join SOS (New Feature)
+    left_join(sos, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_SOS=SOS_Opp_Rank) %>%
+    left_join(sos, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_SOS=SOS_Opp_Rank)
+
+  # 3. Final Cleaning
+  final <- bind_rows(df_wins, df_losses) %>%
+    # Impute missing values with neutral baselines
+    replace_na(list(A_Mom=0.5, B_Mom=0.5, A_Margin=0, B_Margin=0, A_SOS=150, B_SOS=150)) %>%
+    mutate(
+      Seed_Diff = B_Seed - A_Seed,
+      Rank_Diff = B_Rank - A_Rank,
+      Mom_Diff  = A_Mom - B_Mom,
+      Margin_Diff = A_Margin - B_Margin,
+      # SOS_Diff Logic: 
+      # If A has SOS 50 (Hard) and B has SOS 200 (Easy), 50 - 200 = -150.
+      # A negative value indicates Team A is "battle-hardened".
+      SOS_Diff = A_SOS - B_SOS, 
+      H2H_Advantage = replace_na(H2H_Advantage, 0)
+    ) %>%
+    select(Season, Result, Seed_Diff, Rank_Diff, Mom_Diff, Margin_Diff, SOS_Diff, H2H_Advantage)
+  
+  return(final)
+}
+
+# 3. Train Comprehensive Model (V5) 
+
+cat("Computing Strength of Schedule...\n")
+df_sos <- get_sos_adjusted()
+
+cat("Consolidating all features (V5)...\n")
+df_final_v5 <- prepare_final_data_v5(df_seeds, df_tourney_results, df_ranks, df_mom, df_h2h, df_margin, df_sos)
+
+# Split Train/Test
+train_v5 <- df_final_v5 %>% filter(Season < 2019)
+test_v5  <- df_final_v5 %>% filter(Season >= 2019)
+
+dtrain_v5 <- xgb.DMatrix(data = as.matrix(train_v5 %>% select(-Season, -Result)), label = train_v5$Result)
+dtest_v5  <- xgb.DMatrix(data = as.matrix(test_v5 %>% select(-Season, -Result)), label = test_v5$Result)
+
+# Hyperparameters
+params_v5 <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 3,    # Prevent overfitting on complex features
+  eta = 0.02,
+  subsample = 0.7,
+  colsample_bytree = 0.7
+)
+
+cat("Starting training for V5 Model (SOS Adjusted)...\n")
+bst_v5 <- xgb.train(
+  params = params_v5,
+  data = dtrain_v5,
+  nrounds = 1500,
+  watchlist = list(train = dtrain_v5, test = dtest_v5),
+  print_every_n = 100,
+  early_stopping_rounds = 50
+)
+
+# --- Evaluation ---
+preds_v5 <- predict(bst_v5, dtest_v5)
+acc_v5 <- mean(ifelse(preds_v5 > 0.5, 1, 0) == test_v5$Result)
+
+cat("\n==========================================\n")
+cat(sprintf(" V5 Model Accuracy (SOS Adjusted): %.2f%%\n", acc_v5 * 100))
+cat("==========================================\n")
+
+# Feature Importance Visualization
+importance <- xgb.importance(model = bst_v5)
+print(xgb.plot.importance(importance_matrix = importance))
+```
+
+```{r}
+install.packages("Ckmeans.1d.dp")
+```
+
+```{r}
+library(tidyverse)
+library(xgboost)
+library(ggplot2)       
+library(Ckmeans.1d.dp) 
+
+
+# 1. Data Preparation: Comprehensive Feature Integration (V6)
+# Combines Seeds, Rankings, Momentum, H2H, Scoring Margin, and Strength of Schedule (SOS)
+
+prepare_comprehensive_data <- function(seeds, results, ranks, momentum, h2h, margin, sos) {
+  
+  # Parse Seed Numbers
+  seeds_clean <- seeds %>%
+    mutate(Seed_Num = as.integer(substr(Seed, 2, 3))) %>%
+    select(Season, TeamID, Seed_Num)
+  
+  # --- A. Winner Perspective (Label = Positive Point Differential) ---
+  df_wins <- results %>%
+    select(Season, WTeamID, LTeamID, WScore, LScore) %>%
+    mutate(
+      Point_Diff_Real = WScore - LScore, # Positive value
+      Result = 1 
+    ) %>%
+    # Join Features for Winner (Team A)
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(margin, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_Margin=Avg_Score_Diff) %>%
+    left_join(sos, by = c("Season", "WTeamID"="TeamID")) %>% rename(A_SOS=SOS_Opp_Rank) %>%
+    # Join Features for Loser (Team B)
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    left_join(margin, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_Margin=Avg_Score_Diff) %>%
+    left_join(sos, by = c("Season", "LTeamID"="TeamID")) %>% rename(B_SOS=SOS_Opp_Rank) %>%
+    # Join Head-to-Head
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, 1))
+  
+  # --- B. Loser Perspective (Label = Negative Point Differential) ---
+  df_losses <- results %>%
+    select(Season, WTeamID, LTeamID, WScore, LScore) %>%
+    mutate(
+      Point_Diff_Real = LScore - WScore, # Negative value
+      Result = 0 
+    ) %>%
+    # Join Features for Loser (Team A)
+    left_join(seeds_clean, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Seed=Seed_Num) %>%
+    left_join(ranks, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Rank=Mean_Rank) %>%
+    left_join(momentum, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Mom=Last14_WinRate) %>%
+    left_join(margin, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_Margin=Avg_Score_Diff) %>%
+    left_join(sos, by = c("Season", "LTeamID"="TeamID")) %>% rename(A_SOS=SOS_Opp_Rank) %>%
+    # Join Features for Winner (Team B)
+    left_join(seeds_clean, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Seed=Seed_Num) %>%
+    left_join(ranks, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Rank=Mean_Rank) %>%
+    left_join(momentum, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Mom=Last14_WinRate) %>%
+    left_join(margin, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_Margin=Avg_Score_Diff) %>%
+    left_join(sos, by = c("Season", "WTeamID"="TeamID")) %>% rename(B_SOS=SOS_Opp_Rank) %>%
+    # Join Head-to-Head
+    left_join(h2h, by = c("Season", "WTeamID"="WTeamID", "LTeamID"="LTeamID")) %>%
+    mutate(H2H_Advantage = ifelse(is.na(H2H_Val), 0, -1))
+
+  # --- C. Feature Calculation and Cleaning ---
+  final <- bind_rows(df_wins, df_losses) %>%
+    replace_na(list(A_Mom=0.5, B_Mom=0.5, A_Margin=0, B_Margin=0, A_SOS=150, B_SOS=150)) %>%
+    mutate(
+      Seed_Diff   = B_Seed - A_Seed,
+      Rank_Diff   = B_Rank - A_Rank,
+      Mom_Diff    = A_Mom - B_Mom,
+      Margin_Diff = A_Margin - B_Margin,
+      SOS_Diff    = A_SOS - B_SOS, 
+      H2H_Advantage = replace_na(H2H_Advantage, 0)
+    ) %>%
+    # Keep 'Result' for Validation, 'Point_Diff_Real' for Regression Training
+    select(Season, Result, Point_Diff_Real, Seed_Diff, Rank_Diff, Mom_Diff, Margin_Diff, SOS_Diff, H2H_Advantage)
+  
+  return(final)
+}
+
+
+cat("Consolidating datasets...\n")
+# Ensure dependencies exist
+if(!exists("df_sos")) df_sos <- get_sos_adjusted()
+if(!exists("df_margin")) df_margin <- get_score_margin()
+
+df_comprehensive <- prepare_comprehensive_data(df_seeds, df_tourney_results, df_ranks, df_mom, df_h2h, df_margin, df_sos)
+
+cat("Generating Figure 1 (Distribution Plot)...\n")
+p1 <- ggplot(df_comprehensive, aes(x = Point_Diff_Real)) +
+  geom_histogram(aes(y = ..density..), binwidth = 2, fill = "#9b59b6", color = "white", alpha = 0.7) +
+  geom_density(color = "black", size = 1) +
+  geom_vline(aes(xintercept = 0), linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(
+    title = "Figure 1: Distribution of Point Differences",
+    subtitle = "Symmetric distribution supports the use of Regression methodology",
+    x = "Point Difference (Team A - Team B)",
+    y = "Density"
+  )
+print(p1) 
+
+
+# Hyperparameters for Regression
+params_v6 <- list(
+  objective = "reg:squarederror", # Regression objective
+  eval_metric = "rmse",
+  max_depth = 3,
+  eta = 0.02,
+  subsample = 0.7,
+  colsample_bytree = 0.7,
+  alpha = 1
+)
+
+# Prepare CV Folds (Grouped by Season to prevent leakage)
+seasons <- unique(df_comprehensive$Season)
+set.seed(42)
+folds <- split(sample(seasons), 1:5) 
+
+cv_brier_scores <- c()
+cv_accuracies <- c()
+
+for(i in 1:length(folds)) {
+  val_seasons <- folds[[i]]
+  
+  # Split Train/Validation
+  cv_train <- df_comprehensive %>% filter(!Season %in% val_seasons)
+  cv_val   <- df_comprehensive %>% filter(Season %in% val_seasons)
+  
+  # DMatrix Creation
+  dtrain_cv <- xgb.DMatrix(
+    data = as.matrix(cv_train %>% select(Seed_Diff, Rank_Diff, Mom_Diff, Margin_Diff, SOS_Diff, H2H_Advantage)), 
+    label = cv_train$Point_Diff_Real
+  )
+  dval_cv <- xgb.DMatrix(
+    data = as.matrix(cv_val %>% select(Seed_Diff, Rank_Diff, Mom_Diff, Margin_Diff, SOS_Diff, H2H_Advantage))
+  )
+  
+  # Train Model
+  bst_cv <- xgb.train(params = params_v6, data = dtrain_cv, nrounds = 1000, verbose = 0)
+  
+  # Predict Point Differential
+  pred_diff <- predict(bst_cv, dval_cv)
+  
+  # Convert Point Differential to Probability (Sigmoid Transformation)
+  # Coefficient 0.1454 corresponds to an effective standard deviation of ~11
+  pred_prob <- 1 / (1 + exp(-pred_diff * 0.1454))
+  
+  # Calculate Metrics
+  brier <- mean((pred_prob - cv_val$Result)^2)
+  cv_brier_scores <- c(cv_brier_scores, brier)
+  
+  acc <- mean(ifelse(pred_diff > 0, 1, 0) == cv_val$Result)
+  cv_accuracies <- c(cv_accuracies, acc)
+  
+  cat(sprintf("Fold %d (Seasons: %s): Brier Score = %.4f\n", i, paste(head(val_seasons, 3), collapse=","), brier))
+}
+
+final_brier <- mean(cv_brier_scores)
+cat(sprintf(" Final 5-Fold CV Brier Score: %.5f\n", final_brier))
+cat(sprintf(" Final 5-Fold CV Accuracy   : %.2f%%\n", mean(cv_accuracies)*100))
+
+
+
+# Train on full dataset
+dtrain_full <- xgb.DMatrix(
+  data = as.matrix(df_comprehensive %>% select(Seed_Diff, Rank_Diff, Mom_Diff, Margin_Diff, SOS_Diff, H2H_Advantage)), 
+  label = df_comprehensive$Point_Diff_Real
+)
+
+bst_final <- xgb.train(params = params_v6, data = dtrain_full, nrounds = 1500, verbose = 0)
+
+# Calculate Importance
+importance_matrix <- xgb.importance(feature_names = colnames(dtrain_full), model = bst_final)
+
+# Plot
+p2 <- xgb.ggplot.importance(importance_matrix) +
+  theme_minimal() +
+  labs(
+    title = "Figure 2: XGBoost Feature Importance",
+    subtitle = "Rank_Diff and Seed_Diff are the dominant predictors",
+    x = "Importance (Gain)",
+    y = "Feature"
+  ) +
+  theme(legend.position = "none")
+
+print(p2) 
+
+predict_matchup_v6 <- function(season, teamA_name, teamA_seed, teamA_rank, teamA_mom, teamA_margin, teamA_sos,
+                               teamB_name, teamB_seed, teamB_rank, teamB_mom, teamB_margin, teamB_sos,
+                               h2h_winner = "None") {
+  
+  seed_diff   <- teamB_seed - teamA_seed
+  rank_diff   <- teamB_rank - teamA_rank
+  mom_diff    <- teamA_mom - teamB_mom
+  margin_diff <- teamA_margin - teamB_margin
+  sos_diff    <- teamA_sos - teamB_sos
+  
+  h2h_val <- 0
+  if (h2h_winner == "A") h2h_val <- 1
+  if (h2h_winner == "B") h2h_val <- -1
+  
+  input_data <- matrix(c(seed_diff, rank_diff, mom_diff, margin_diff, sos_diff, h2h_val), nrow = 1)
+  colnames(input_data) <- c("Seed_Diff", "Rank_Diff", "Mom_Diff", "Margin_Diff", "SOS_Diff", "H2H_Advantage")
+  
+  pred_score_diff <- predict(bst_final, xgb.DMatrix(data = input_data))
+  prob <- 1 / (1 + exp(-pred_score_diff * 0.1454))
+  
+  cat(sprintf("\nPrediction: %d %s vs %s\n", season, teamA_name, teamB_name))
+  if (pred_score_diff > 0) {
+    cat(sprintf("Winner: %s (Prob: %.1f%%)\n", teamA_name, prob * 100))
+  } else {
+    cat(sprintf("Winner: %s (Prob: %.1f%%)\n", teamB_name, (1 - prob) * 100))
+  }
+}
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+winning_margins <- train_v6 %>% 
+  filter(Point_Diff_Real > 0) %>%
+  pull(Point_Diff_Real)
+
+mean_margin <- mean(winning_margins)
+median_margin <- median(winning_margins)
+
+p1 <- ggplot(data.frame(Margin = winning_margins), aes(x = Margin)) +
+  geom_histogram(binwidth = 2, fill = "#3498db", color = "white", alpha = 0.8) +
+  geom_density(aes(y = ..count.. * 2), color = "#2c3e50", size = 1) +
+  geom_vline(aes(xintercept = mean_margin), color = "red", linetype = "dashed", size = 1) +
+  annotate("text", x = mean_margin + 8, y = 100, 
+           label = paste("Mean:", round(mean_margin, 1)), color = "red") +
+  theme_minimal() +
+  labs(
+    title = "NCAA Tournament Winning Margin Distribution",
+    subtitle = "Distribution of point differentials in winning games only",
+    x = "Winning Margin (Points)",
+    y = "Count"
+  )
+
+print(p1)
+
+p2 <- ggplot(train_v6, aes(x = Point_Diff_Real)) +
+  geom_histogram(binwidth = 2, fill = "#9b59b6", color = "white", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "black", size = 1) +
+  theme_minimal() +
+  labs(
+    title = "Full Point Difference Distribution (Target Variable)",
+    subtitle = "Symmetric distribution suitable for Regression",
+    x = "Point Difference (Negative = Loss, Positive = Win)",
+    y = "Count"
+  )
+
+print(p2)
+
+cat("\n--- Historical Statistics ---\n")
+cat(sprintf("Mean Winning Margin : %.2f\n", mean_margin))
+cat(sprintf("Median Winning Margin: %.2f\n", median_margin))
+cat(sprintf("Max Margin           : %.0f\n", max(winning_margins)))
+cat(sprintf("Games <= 10 pts diff : %.1f%%\n", mean(winning_margins <= 10) * 100))
+cat("-----------------------------\n")
+```
